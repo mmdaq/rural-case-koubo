@@ -6,6 +6,7 @@ __pycache__/
 data/logs/
 data/output/
 data/seen_cases.json
+data/extra_cases.json
 .venv/
 venv/
 .DS_Store

@@ -1,22 +1,30 @@
-"""案例采集器：多源抓取 + 容错降级
+"""案例采集器：多源抓取 + 容错降级 + 自我扩充
 
 采集策略（任一环节失败不阻塞整体）：
-1. rmfyalk   —— 人民法院案例库官网（需登录态，多数环境不可用）
-2. court_gov —— 最高人民法院官网涉农典型案例
-3. search_web—— 搜索引擎检索"人民法院案例库 + 关键词"的转载页面，从中抽取入库编号
+1. rmfyalk   —— 人民法院案例库官网（需登录态，多数环境不可用，仅探测）
+2. court_gov —— 最高人民法院官网涉农典型案例（固定栏目）
+3. discover  —— 【自我扩充核心】三层探索：
+                 a. 预置转载链接池（人工核实的案例库原文页，含一页多案例专题）
+                 b. 转载源列表翻页（税递网等，标题预过滤）
+                 c. 搜索引擎检索（辅助）
+                 → extractor 提取结构化案例 → 主题过滤 → 校验 → 写入本地扩展案例库
 4. fallback  —— 内置种子案例（真实已核实案例），保证每日任务可产出
 """
 import random
 import re
 import time
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
+from .extractor import extract_case, extract_cases_multi
 from .fallback import SEED_CASES
+from .extrastore import ExtraStore
 from .models import Case
 from .sources import RMFYALK_SEARCH, COURT_GOV_AGRICULTURE, SEARCH_ENGINES
 from utils.logger import get_logger
+from utils.validator import verify_case
 
 log = get_logger("collector")
 
@@ -29,6 +37,13 @@ HEADERS = {
 }
 
 RULE_CODE_RE = re.compile(r"\d{4}-\d{2}-\d{1,2}-\d{3}-\d{3}")
+
+# 农村/集体资产主题关键词（提取结果必须命中，防止无关案例混入）
+TOPIC_HINTS = [
+    "集体经济组织", "征地", "征收补偿", "土地承包", "集体收益", "分红",
+    "成员资格", "宅基地", "村规民约", "外嫁女", "村民小组", "村委会",
+    "股权证", "承包地", "安置补助", "青苗", "入市", "集体资产",
+]
 
 
 def _safe_get(url: str, timeout: int = 15) -> str | None:
@@ -80,54 +95,258 @@ def fetch_court_gov(**kwargs) -> list[Case]:
     ]
 
 
-def _extract_codes(html: str) -> list[str]:
-    """从页面文本抽取入库编号"""
-    return list(dict.fromkeys(RULE_CODE_RE.findall(html)))
+# ---------------- 预置转载链接池 ----------------
+
+# 人工核实的案例库原文/专题页面（multi=True 表示一页含多个案例，如澎湃"一网一库"专题）
+SEED_LINKS = [
+    {"url": "https://m.thepaper.cn/newsDetail_forward_32405836", "name": "澎湃·一网一库专题第61期", "multi": True},
+    {"url": "https://www.taxdy.cn/h-nd-293634.html", "name": "税递网案例库原文", "multi": False},
+    {"url": "https://www.taxdy.cn/h-nd-294941.html", "name": "税递网案例库原文", "multi": False},
+    {"url": "https://www.taxdy.cn/h-nd-295450.html", "name": "税递网案例库原文", "multi": False},
+    {"url": "https://www.taxdy.cn/h-nd-295577.html", "name": "税递网案例库原文", "multi": False},
+    {"url": "https://m.055110.com/fl/3/6279.html", "name": "安徽律师网案例库原文", "multi": False},
+    {"url": "https://shengtinglaw.com/qita-xiangqing-11044.html", "name": "圣廷律师案例解析", "multi": True},
+]
 
 
-def fetch_search_web(keywords: list, max_pages: int = 3) -> list[Case]:
-    """搜索引擎检索案例库转载页，抽取入库编号（不保证完整案情，仅作线索）"""
+def fetch_seed_links() -> list[Case]:
+    """抓预置链接池（含一页多案例页面）"""
     found: list[Case] = []
-    for kw in random.sample(keywords, min(len(keywords), max_pages)):
-        for engine, tmpl in SEARCH_ENGINES.items():
-            html = _safe_get(tmpl.format(q=requests.utils.quote(kw)))
+    for item in SEED_LINKS:
+        try:
+            html = _safe_get(item["url"], timeout=15)
             if not html:
                 continue
-            codes = _extract_codes(html)
-            for code in codes[:5]:
-                found.append(
-                    Case(
-                        rule_code=code,
-                        title=f"线索案例（待补全）{code}",
-                        keywords=[kw],
-                        facts="线索来源：" + engine,
-                        source_urls=[],
-                        source_names=[engine],
-                    )
-                )
-            time.sleep(1)
+            if item.get("multi"):
+                cases = extract_cases_multi(html, item["url"], item["name"])
+            else:
+                case = extract_case(html, item["url"], item["name"])
+                cases = [case] if case else []
+            for c in cases:
+                found.append(c)
+                log.info("预置链接提取: %s | %s", c.rule_code, (c.title or "")[:40])
+            time.sleep(0.4)
+        except Exception as e:
+            log.warning("预置链接 %s 异常: %s", item["url"], e)
     return found
 
 
-def collect(keywords: list, use_fallback: bool = True, max_cases: int = 20) -> list[Case]:
-    """主采集入口：按源顺序尝试，汇总去重后返回"""
+# ---------------- 转载源列表翻页 ----------------
+
+# 已知的"人民法院案例库"转载栏目（可自行追加新源）
+FEED_SOURCES = [
+    {
+        "name": "税递网·人民法院案例库栏目",
+        "url": "https://www.taxdy.cn/h-nr--0_865_520.html",
+        "link_pattern": "h-nd-",
+        "page_param": "m31pageno",
+        "max_pages": 30,
+    },
+    {
+        "name": "安徽律师网·民事参考案例",
+        "url": "https://m.055110.com/fl/3/",
+        "link_pattern": "fl/3/",
+        "page_param": None,
+        "max_pages": 1,
+    },
+]
+
+
+def _extract_detail_links(list_html: str, pattern: str | None, base_url: str = "") -> list[tuple[str, str]]:
+    """从列表页提取详情链接（支持相对路径），返回 [(url, 标题文本)]"""
+    soup = BeautifulSoup(list_html, "html.parser")
+    links = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if href.startswith(("javascript", "#", "mailto:")):
+            continue
+        if pattern and pattern not in href:
+            continue
+        full = urljoin(base_url, href)
+        if not full.startswith("http"):
+            continue
+        title = a.get_text(strip=True)
+        links.append((full, title))
+    return list(dict.fromkeys(links))
+
+
+def _list_title_relevant(title: str) -> bool:
+    """列表项标题预过滤：标题含涉农关键词才值得抓详情"""
+    if not title:
+        return True
+    return any(k in title for k in TOPIC_HINTS)
+
+
+def fetch_feeds(per_source: int = 8, max_fetch: int = 30) -> list[Case]:
+    """抓转载源列表页（支持分页）→遍历全部链接做标题预过滤→详情页→提取案例
+
+    翻页收集大量链接，但只抓取标题命中涉农关键词的详情页（max_fetch 控制抓取上限）。
+    """
+    found: list[Case] = []
+    seen_urls: set[str] = set()
+    for src in FEED_SOURCES:
+        max_pages = int(src.get("max_pages", 1))
+        page_param = src.get("page_param")
+        try:
+            detail_links: list[tuple[str, str]] = []
+            for page_no in range(1, max_pages + 1):
+                url = src["url"]
+                if page_param and page_no > 1:
+                    sep = "&" if "?" in url else "?"
+                    url = f"{url}{sep}{page_param}={page_no}"
+                list_html = _safe_get(url, timeout=15)
+                if not list_html:
+                    continue
+                detail_links.extend(_extract_detail_links(list_html, src.get("link_pattern"), base_url=src["url"]))
+                time.sleep(0.3)
+            log.info("转载源【%s】翻页获取 %d 个详情链接", src["name"], len(detail_links))
+            fetched = 0
+            for url, title in detail_links:
+                if url in seen_urls:
+                    continue
+                if not _list_title_relevant(title):
+                    continue
+                if fetched >= max_fetch:
+                    break
+                seen_urls.add(url)
+                fetched += 1
+                html = _safe_get(url, timeout=15)
+                if not html:
+                    continue
+                case = extract_case(html, url, source_name=src["name"])
+                if case:
+                    found.append(case)
+                    log.info("提取成功: %s | %s", case.rule_code, (case.title or "")[:40])
+                time.sleep(0.4)
+        except Exception as e:
+            log.warning("转载源 %s 异常: %s", src.get("name"), e)
+    return found
+
+
+# ---------------- 搜索引擎检索（辅助源） ----------------
+
+def _search_result_links(query: str, max_links: int = 6) -> list[str]:
+    """搜索引擎检索，返回结果页链接（过滤搜索引擎自身域名）"""
+    html = _safe_get(SEARCH_ENGINES["bing"].format(q=requests.utils.quote(query)))
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    links = []
+    for a in soup.select("li.b_algo h2 a, h2 a"):
+        href = (a.get("href") or "").strip()
+        if href.startswith("http") and "bing.com" not in href and "microsoft.com" not in href:
+            links.append(href)
+    return list(dict.fromkeys(links))[:max_links]
+
+
+def fetch_search_web(keywords: list, max_pages: int = 2, per_page: int = 5) -> list[Case]:
+    """搜索引擎检索→抓全文→提取案例（结果质量依赖网络环境）"""
+    found: list[Case] = []
+    seen_urls: set[str] = set()
+    for kw in random.sample(keywords, min(len(keywords), max_pages)):
+        links = _search_result_links(kw, per_page)
+        for url in links:
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            html = _safe_get(url, timeout=12)
+            if not html:
+                continue
+            case = extract_case(html, url, source_name="搜索引擎")
+            if case:
+                found.append(case)
+            time.sleep(0.4)
+    return found
+
+
+# ---------------- 自我扩充主入口 ----------------
+
+def discover_new_cases(extra: ExtraStore, keywords: list, max_new: int = 10) -> list[Case]:
+    """探索并入库新案例：预置链接 → 转载源翻页 → 搜索引擎 → 主题过滤 → 校验 → 写扩展库
+
+    返回本次【新入库】的案例列表（已存在扩展库的编号只累计来源数）。
+    """
+    discovered: list[Case] = []
+    try:
+        discovered += fetch_seed_links()
+    except Exception as e:
+        log.warning("预置链接采集异常: %s", e)
+    try:
+        discovered += fetch_feeds()
+    except Exception as e:
+        log.warning("转载源采集异常: %s", e)
+    try:
+        discovered += fetch_search_web(keywords)
+    except Exception as e:
+        log.warning("搜索引擎采集异常: %s", e)
+
+    new_cases: list[Case] = []
+    seen_codes: set[str] = set()
+    for c in discovered:
+        if c.rule_code in seen_codes:
+            continue
+        seen_codes.add(c.rule_code)
+        # 主题过滤：必须与农村/集体资产相关
+        blob = (c.title or "") + (c.facts or "") + (c.gist or "")
+        if not any(k in blob for k in TOPIC_HINTS):
+            log.info("非农村集体资产主题，丢弃 %s | %s", c.rule_code, (c.title or "")[:30])
+            continue
+        v = verify_case(c.to_dict(), min_sources=0)  # 弱校验：编号格式+内容要素+字段完整
+        if not v["ok"]:
+            log.info("提取案例未通过校验，丢弃 %s: %s", c.rule_code, v["issues"])
+            continue
+        changed = extra.upsert(c)
+        if changed:
+            new_cases.append(c)
+    log.info(
+        "本次探索：发现 %d 个、新入库 %d 个，扩展库累计 %d 个",
+        len(discovered), len(new_cases), extra.stats()["total"],
+    )
+    return new_cases[:max_new]
+
+
+# ---------------- 主采集入口 ----------------
+
+def collect(
+    keywords: list,
+    extra: ExtraStore | None = None,
+    use_fallback: bool = True,
+    max_cases: int = 20,
+) -> list[Case]:
+    """主采集：探索新案例 → 扩展库 → 种子，汇总去重返回
+
+    优先级：种子（人工核实） > 扩展库（自动发现+校验） > 官网固定源
+    """
     all_cases: dict[str, Case] = {}
 
-    for fetcher in (fetch_rmfyalk, fetch_court_gov, fetch_search_web):
+    # 1. 官网/最高院固定源（尽力而为）
+    for fetcher in (fetch_rmfyalk, fetch_court_gov):
         try:
-            cases = fetcher(keywords) if fetcher is fetch_search_web else fetcher()
+            cases = fetcher(keywords)
             for c in cases:
                 if c.rule_code:
                     all_cases.setdefault(c.rule_code, c)
         except Exception as e:
             log.warning("采集源 %s 异常: %s", fetcher.__name__, e)
 
-    log.info("网络采集到 %d 个案例", len(all_cases))
+    # 2. 自我扩充：探索新案例并写入扩展库
+    if extra is not None:
+        try:
+            discover_new_cases(extra, keywords)
+        except Exception as e:
+            log.warning("案例探索异常（不影响主流程）: %s", e)
+        # 扩展库全部案例参与候选（含历史累积）
+        for d in extra.all_cases():
+            all_cases.setdefault(d["rule_code"], Case.from_dict(d))
 
+    # 3. 内置种子兜底（人工核实，优先于自动提取的同编号案例）
     if use_fallback:
         for seed in SEED_CASES:
-            # 种子案例为人工核实过的干净数据，优先于网络线索（覆盖同编号）
             all_cases[seed["rule_code"]] = Case.from_dict(seed)
-        log.info("合并内置种子案例，共 %d 个", len(all_cases))
 
-    return list(all_cases.values())[:max_cases]
+    cases = list(all_cases.values())
+    log.info(
+        "候选案例池共 %d 个（扩展库 %d 个）",
+        len(cases), extra.stats()["total"] if extra else 0,
+    )
+    return cases[:max_cases]

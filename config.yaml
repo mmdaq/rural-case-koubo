@@ -65,3 +65,5 @@ verify:
 storage:
   # 已推送案例去重库
   seen_file: "data/seen_cases.json"
+  # 自动探索发现的新案例扩展库（每日累积）
+  extra_file: "data/extra_cases.json"

@@ -12,6 +12,7 @@ import os
 from datetime import datetime
 
 from collector.crawler import collect
+from collector.extrastore import ExtraStore
 from collector.models import Case
 from generator.llm import generate_script
 from mailer.sender import send_email
@@ -49,28 +50,31 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
     """执行一次完整流程，返回结果摘要"""
     cfg = cfg or _load_config()
     base = os.path.dirname(os.path.abspath(__file__))
-    seen = SeenStore(os.path.join(base, cfg.get("storage", {}).get("seen_file", "data/seen_cases.json")))
+    storage = cfg.get("storage", {})
+    seen = SeenStore(os.path.join(base, storage.get("seen_file", "data/seen_cases.json")))
+    extra = ExtraStore(os.path.join(base, storage.get("extra_file", "data/extra_cases.json")))
 
-    # 1. 采集
+    # 1. 采集（含自我扩充：搜索→提取→写扩展库）
     coll = cfg.get("collector", {})
     cases = collect(
         keywords=coll.get("keywords", []),
+        extra=extra,
         use_fallback=coll.get("use_fallback", True),
         max_cases=int(coll.get("max_cases_per_day", 20)),
     )
     log.info("采集到案例 %d 个", len(cases))
 
-    # 2. 真伪核查（软校验：不合格案例记录问题但仍保留，避免误杀真实案例；字段残缺的线索案例丢弃）
+    # 2. 真伪核查（软校验：不合格案例记录问题但仍保留，避免误杀真实案例；内容残缺的线索案例丢弃）
     verify_cfg = cfg.get("verify", {})
     min_src = int(verify_cfg.get("min_independent_sources", 1))
     valid: list[Case] = []
     for c in cases:
         v = verify_case(c.to_dict(), min_sources=min_src)
+        # 内容残缺（无案情/无裁判要旨/案情过短）的线索案例直接丢弃，防止生成垃圾文案
+        if not (c.facts or "").strip() or len(c.facts) < 50 or not (c.gist or "").strip():
+            log.info("丢弃内容残缺案例 %s", c.rule_code)
+            continue
         if not v["ok"]:
-            # 线索案例（facts 为空）直接丢弃
-            if not (c.facts or "").strip() or not c.title:
-                log.info("丢弃不合格案例 %s: %s", c.rule_code, v["issues"])
-                continue
             log.warning("案例 %s 存在瑕疵（保留）: %s", c.rule_code, v["issues"])
         valid.append(c)
 
