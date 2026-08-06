@@ -12,11 +12,14 @@ log = get_logger("mailer")
 
 
 def _load_env(config: dict) -> dict:
-    """合并 .env 中的敏感配置（授权码等）"""
+    """合并 .env 中的敏感配置（授权码等）
+
+    优先级：.env 环境变量 > config.yaml（config.yaml 中 sender 是占位符，必须允许被覆盖）
+    """
     cfg = dict(config)
-    cfg["sender"] = cfg.get("sender") or os.getenv("MAIL_SENDER", "")
-    cfg["auth_code"] = cfg.get("auth_code") or os.getenv("MAIL_AUTH_CODE", "")
-    receivers = cfg.get("receivers") or []
+    cfg["sender"] = os.getenv("MAIL_SENDER") or cfg.get("sender", "")
+    cfg["auth_code"] = os.getenv("MAIL_AUTH_CODE") or cfg.get("auth_code", "")
+    receivers = list(cfg.get("receivers") or [])
     env_receivers = os.getenv("MAIL_RECEIVERS", "")
     if env_receivers:
         receivers += [r.strip() for r in env_receivers.split(",") if r.strip()]

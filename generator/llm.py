@@ -75,18 +75,18 @@ USER_PROMPT_TMPL = """请参考以下2篇范例的风格与格式（口吻、结
 
 
 def _parse_output(text: str) -> dict | None:
-    """解析 LLM 输出为 {rule_code,title,body,cta}"""
+    """解析 LLM 输出为 {rule_code,title,body,cta}（兼容多种字段命名）"""
     fields = {}
-    m = re.search(r"入库编号[:：]\s*([^\n]+)", text)
+    m = re.search(r"(?:入库编号|rule_code|编号)[:：]\s*([^\n]+)", text)
     if m:
         fields["rule_code"] = m.group(1).strip()
-    m = re.search(r"标题[:：]\s*([^\n]+)", text)
+    m = re.search(r"(?:标题|title)[:：]\s*([^\n]+)", text)
     if m:
         fields["title"] = m.group(1).strip()
-    m = re.search(r"正文[:：]\s*([\s\S]*?)(?=评论区互动|$)", text)
+    m = re.search(r"(?:正文|body)[:：]\s*([\s\S]*?)(?=(?:评论区互动|cta|互动)[:：]|$)", text)
     if m:
         fields["body"] = m.group(1).strip()
-    m = re.search(r"评论区互动[:：]\s*([^\n]+)", text)
+    m = re.search(r"(?:评论区互动|cta|互动)[:：]\s*([^\n]+)", text)
     if m:
         fields["cta"] = m.group(1).strip()
     if fields.get("rule_code") and fields.get("body"):
