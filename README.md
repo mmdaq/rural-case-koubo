@@ -117,6 +117,40 @@ docker build -t rural-case-koubo .
 docker run -d --name rck -v $(pwd)/data:/app/data --env-file .env rural-case-koubo
 ```
 
+### 方式 D：GitHub Actions 云端自动运行（推荐，电脑不用开机）
+
+项目内置 `.github/workflows/daily-run.yml`，推送后由 GitHub 服务器每天自动执行，**无需自己的电脑/服务器在线**。
+
+**① 推送后配置 Secrets（必须，否则邮件发不出去）**
+
+仓库页面 → **Settings** → 左侧 **Secrets and variables** → **Actions** → **New repository secret**，逐个添加：
+
+| Secret 名称 | 值 | 必填 |
+|---|---|---|
+| `MAIL_SENDER` | 你的QQ邮箱，如 385096659@qq.com | ✅ |
+| `MAIL_AUTH_CODE` | QQ邮箱SMTP授权码（16位） | ✅ |
+| `MAIL_RECEIVERS` | 收件邮箱，多个用英文逗号分隔 | ✅ |
+| `LLM_API_KEY` | DeepSeek API Key（提升文案质量） | 可选 |
+
+**② 手动测试一次**
+
+仓库 **Actions** 页面 → 左侧选"每日农村案例口播推送" → 右侧 **Run workflow** → 绿色按钮。约 2-5 分钟后运行成功，检查邮箱是否收到5篇文案。
+
+**③ 之后每天自动跑**
+
+工作流内置定时 `0 0 * * *`（UTC）= **每天北京时间 08:00** 自动执行：采集探索 → 核查去重 → 生成5篇 → 发邮件。
+
+**④ 每日不重复的保障**
+
+- `data/seen_cases.json`（去重库）与 `data/extra_cases.json`（扩展案例库）**随仓库提交持久化**（已配置好，不要删它们或加入 .gitignore）；
+- 每次运行结束后，工作流自动把这两个文件 `git commit + push` 回仓库，因此云端每次运行都是"接着上次继续"，不会重复推送同一案例。
+
+**⑤ 查看/下载每天文案**
+
+Actions 运行页 → 该次运行的 **Artifacts** 区可下载当天的 `口播文案-日期.md`。
+
+> 免费额度：公共仓库 Actions 无限时长；私有仓库每月 2000 分钟，本项目每天约 3-5 分钟，绰绰有余。
+
 ## 案例真伪核查机制
 
 每个案例推送前经过三重校验（`utils/validator.py`）：

@@ -5,8 +5,8 @@ __pycache__/
 *.pyc
 data/logs/
 data/output/
-data/seen_cases.json
-data/extra_cases.json
+# 注意：data/seen_cases.json 与 data/extra_cases.json 必须入库！
+# 它们承载"每日不重复"与"案例累积"，云端每次运行是全新环境，靠仓库持久化。
 .venv/
 venv/
 .DS_Store

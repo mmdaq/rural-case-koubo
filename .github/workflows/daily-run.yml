@@ -1,0 +1,63 @@
+# ============================================================
+# 每日农村集体资产案例口播推送（GitHub Actions 云端自动运行）
+# - 每天北京时间 08:00 自动执行（UTC 00:00）
+# - 运行：采集/探索案例 → 去重 → 生成5篇文案 → 发邮件到收件箱
+# - 运行数据（去重库/扩展库）自动提交回仓库，保证每天5篇不重复
+# - 可手动触发测试：仓库 Actions 页 → 本工作流 → Run workflow
+# ============================================================
+name: 每日农村案例口播推送
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 每天 00:00 UTC = 北京时间 08:00
+  workflow_dispatch:      # 支持在 Actions 页面手动点击运行
+
+permissions:
+  contents: write         # 允许把运行数据提交回仓库
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  daily-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 检出代码（含历史运行数据）
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 写入邮箱/密钥配置（来自仓库 Secrets）
+        run: |
+          cat > .env <<'EOF'
+          MAIL_SENDER=${{ secrets.MAIL_SENDER }}
+          MAIL_AUTH_CODE=${{ secrets.MAIL_AUTH_CODE }}
+          MAIL_RECEIVERS=${{ secrets.MAIL_RECEIVERS }}
+          LLM_API_KEY=${{ secrets.LLM_API_KEY }}
+          EOF
+
+      - name: 运行主流程（采集→核查→去重→生成5篇→发邮件）
+        run: python main.py run-once
+
+      - name: 运行数据提交回仓库（保证次日不重复）
+        run: |
+          git config user.name "mmdaq"
+          git config user.email "385096659@qq.com"
+          git pull --rebase origin main --autostash || echo "跳过 pull（首次运行）"
+          git add -f data/seen_cases.json data/extra_cases.json
+          git commit -m "chore: 更新每日运行数据 $(date +%F)" || echo "本次无数据变更"
+          git push
+
+      - name: 上传每日文案（可在 Actions 页面下载，保留90天）
+        uses: actions/upload-artifact@v4
+        with:
+          name: 口播文案-$(date +%F)
+          path: data/output/*.md
+          if-no-files-found: ignore
