@@ -322,7 +322,7 @@ def collect(
     # 1. 官网/最高院固定源（尽力而为）
     for fetcher in (fetch_rmfyalk, fetch_court_gov):
         try:
-            cases = fetcher(keywords)
+            cases = fetcher(keywords=keywords)
             for c in cases:
                 if c.rule_code:
                     all_cases.setdefault(c.rule_code, c)
