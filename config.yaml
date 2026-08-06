@@ -1,0 +1,67 @@
+# ============================================================
+# 农村集体资产案例口播文案机器人 - 主配置
+# 敏感信息（邮箱授权码、API Key）请填入 .env，本文件只写非敏感配置
+# ============================================================
+
+schedule:
+  # 每日执行时间（24小时制），默认早上 8 点
+  time: "08:00"
+  timezone: "Asia/Shanghai"
+
+mail:
+  # 发件邮箱 SMTP 配置（QQ 邮箱默认值）
+  smtp_host: "smtp.qq.com"
+  smtp_port: 465
+  use_ssl: true
+  # 发件人邮箱（必填）
+  sender: "your_account@qq.com"
+  # 收件人列表（必填，可多个）
+  receivers:
+    - "385096659@qq.com"
+  subject_prefix: "【农村集体案例口播】"
+
+llm:
+  # 文案生成：deepseek / openai / none
+  # none 或未配置 api_key 时自动降级为本地模板引擎
+  provider: "deepseek"
+  api_key: ""                # 建议放 .env: LLM_API_KEY=xxx
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-chat"
+  temperature: 0.8
+  timeout: 60
+
+collector:
+  # 每日采集上限
+  max_cases_per_day: 20
+  # 采集数据源开关（全部失败时自动使用内置种子案例）
+  sources:
+    rmfyalk: true            # 人民法院案例库官网（需登录态，通常失败）
+    court_gov: true          # 最高人民法院官网涉农案例
+    search_web: true         # 搜索引擎检索人民法院案例库转载
+  # 内置种子案例兜底（含已核实的真实案例）
+  use_fallback: true
+  # 检索关键词（围绕农村/集体资产）
+  keywords:
+    - "侵害集体经济组织成员权益 人民法院案例库"
+    - "外嫁女 征地补偿 人民法院案例库"
+    - "农村集体收益分配 案例库 判决"
+    - "村规民约 集体经济组织成员 案例"
+    - "集体经营性建设用地 收益分配 案例库"
+
+generator:
+  # 每天生成的文案篇数
+  count_per_day: 5
+  # 输出目录
+  output_dir: "data/output"
+  # 是否在邮件中附带文案 markdown 附件
+  attach_file: true
+
+verify:
+  # 真伪核查：同一案例至少出现在几个独立域名来源才算可信
+  min_independent_sources: 1
+  # 入库编号格式校验开关
+  check_rule_code: true
+
+storage:
+  # 已推送案例去重库
+  seen_file: "data/seen_cases.json"

@@ -1,0 +1,11 @@
+# 敏感配置与运行时产物不入库
+.env
+config.local.yaml
+__pycache__/
+*.pyc
+data/logs/
+data/output/
+data/seen_cases.json
+.venv/
+venv/
+.DS_Store
