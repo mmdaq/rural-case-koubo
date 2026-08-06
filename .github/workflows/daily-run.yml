@@ -58,6 +58,6 @@ jobs:
       - name: 上传每日文案（可在 Actions 页面下载，保留90天）
         uses: actions/upload-artifact@v4
         with:
-          name: 口播文案-$(date +%F)
+          name: 每日口播文案
           path: data/output/*.md
           if-no-files-found: ignore

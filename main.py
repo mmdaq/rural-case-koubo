@@ -70,6 +70,10 @@ def main():
         )
         for s in result["scripts"]:
             print(f"  · {s['rule_code']} {s['title']}")
+        # 关键：非 dry-run 且邮件未发送成功 → 非零退出，让 GitHub Actions 标红可见
+        if not dry and not result.get("sent"):
+            log.error("邮件发送失败，任务标记失败（检查 .env 的授权码/收件人/发件人）")
+            sys.exit(2)
     else:
         log.error("任务失败")
         sys.exit(1)
