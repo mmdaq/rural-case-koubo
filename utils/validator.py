@@ -1,9 +1,21 @@
-"""案例真伪核查：入库编号格式 / 裁判文书号格式 / 字段完整性 / 多源交叉验证"""
+"""案例真伪核查：入库编号格式 / 裁判文书号格式 / 字段完整性 / 官方可查锚点 / 多源交叉验证
+
+"真实可查"判定（满足其一即可推送）：
+1. 官方链接：source_urls / official_link 中含人民法院案例库、最高法官网或 *.gov.cn 官方域名；
+2. 编号+文书号：入库编号格式合法 且 裁判文书号格式合法（两者均可在官方渠道检索核实）；
+3. 编号+多源交叉：入库编号格式合法 且 至少 2 个独立域名转载来源内容一致。
+"""
 import re
 from urllib.parse import urlparse
 
 # 入库编号格式：YYYY-XX-X-XXX-XXX，如 2024-07-2-044-005
 RULE_CODE_RE = re.compile(r"^\d{4}-\d{2}-\d{1,2}-\d{3}-\d{3}$")
+
+# 官方可查域名：人民法院案例库 / 最高法官网 / 政府与法院系统官网
+OFFICIAL_DOMAINS = (
+    "rmfyalk.court.gov.cn",
+    "court.gov.cn",
+)
 
 # 裁判文书号格式：如 （2019）闽07民终1227号 / (2020)苏0923民初2646号
 DOC_NO_RE = re.compile(
@@ -29,10 +41,12 @@ def check_doc_no(doc_no: str) -> bool:
     return bool(DOC_NO_RE.search(doc_no))
 
 
-def missing_fields(case: dict) -> list:
+def missing_fields(case: dict, skip: tuple = ()) -> list:
     """返回缺失的必填字段名列表"""
     missing = []
     for f in REQUIRED_FIELDS:
+        if f in skip:
+            continue
         v = case.get(f)
         if isinstance(v, str):
             if not v.strip():
@@ -54,21 +68,55 @@ def domain(url: str) -> str:
     return urlparse(url).netloc or ""
 
 
+def is_official_url(url: str) -> bool:
+    """是否官方可查链接（案例库/最高法官网/政府法院系统官网）"""
+    d = domain(url).lower()
+    if not d:
+        return False
+    if d in OFFICIAL_DOMAINS or d.endswith(".court.gov.cn"):
+        return True
+    # 政府/法院系统域名（*.gov.cn）视为官方渠道
+    return d.endswith(".gov.cn")
+
+
 def independent_sources(case: dict) -> int:
     """同一案例出现在几个独立域名来源（用于交叉验证真伪）"""
     return len({domain(u) for u in case.get("source_urls", []) if domain(u)})
 
 
-def verify_case(case: dict, min_sources: int = 1) -> dict:
+def official_anchor(case: dict) -> tuple[bool, str]:
+    """返回 (是否具备官方可查锚点, 锚点类型说明)"""
+    urls = list(case.get("source_urls") or [])
+    if case.get("official_link"):
+        urls.append(case["official_link"])
+    if any(is_official_url(u) for u in urls):
+        return True, "官方链接"
+
+    code_ok = check_rule_code(case.get("rule_code", ""))
+    doc_no = (case.get("doc_no") or "").strip()
+    if code_ok and doc_no and check_doc_no(doc_no):
+        return True, "入库编号+裁判文书号"
+
+    if code_ok and independent_sources(case) >= 2:
+        return True, "入库编号+多源交叉"
+
+    return False, ""
+
+
+def verify_case(case: dict, min_sources: int = 1, require_official_anchor: bool = True) -> dict:
     """综合核查，返回 {ok, issues}"""
     issues = []
 
-    if not check_rule_code(case.get("rule_code", "")):
+    code_ok = check_rule_code(case.get("rule_code", ""))
+    if not code_ok and not (case.get("official_link") or "").strip():
         issues.append(f"入库编号格式非法: {case.get('rule_code')}")
     if not check_doc_no(case.get("doc_no", "")):
         issues.append(f"裁判文书号格式非法: {case.get('doc_no')}")
 
-    missing = missing_fields(case)
+    # 有官方链接可查时，允许无入库编号（如最高院典型案例仅给官方链接）
+    has_official_link = bool((case.get("official_link") or "").strip())
+    skip = ("rule_code",) if not code_ok and has_official_link else ()
+    missing = missing_fields(case, skip=skip)
     if missing:
         issues.append(f"缺少必填字段: {missing}")
     if not content_plausible(case):
@@ -77,5 +125,13 @@ def verify_case(case: dict, min_sources: int = 1) -> dict:
     n_src = independent_sources(case)
     if n_src < min_sources:
         issues.append(f"独立来源仅 {n_src} 个，低于阈值 {min_sources}")
+
+    if require_official_anchor:
+        has_anchor, anchor_kind = official_anchor(case)
+        if not has_anchor:
+            issues.append(
+                "缺少官方可查锚点：需提供官方链接（案例库/最高院/政府法院官网），"
+                "或 入库编号+裁判文书号，或 ≥2 个独立域名交叉来源"
+            )
 
     return {"ok": not issues, "issues": issues, "independent_sources": n_src}

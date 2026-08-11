@@ -5,6 +5,7 @@ import re
 import requests
 
 from generator import template
+from generator.painpoints import PAIN_POINTS, SCENARIO_CTAS, REFERENCE_CTAS
 from collector.models import Case
 from utils.logger import get_logger
 
@@ -41,17 +42,18 @@ STYLE_EXAMPLES = [
 ]
 
 SYSTEM_PROMPT = """你是资深法律口播文案作者，专门为短视频平台撰写"农村集体资产维权"类口播文案。
-你的读者是普通农村群众。要求：
-1. 口语化、有冲突感、有具体数字和细节，像讲身边事；
-2. 严格依据提供的真实案例事实，不虚构事实、不夸大金额；
-3. 结尾必须点出法律态度（如"村规民约大不过法律"）；
-4. 评论区互动要提问式、有钩子。
+你的读者是普通农村群众。硬性要求：
+1. 【只写纯口播文案】只输出：标题、正文、评论区互动。不写任何法律分析、说明、案例核查记录、来源罗列等非口播内容。
+2. 【案例必须真实】只依据提供的真实案例（入库编号/案情/裁判要旨）改编，严禁杜撰或编造案件，严禁虚构人名、地点、金额、判决结果；原文未交代的地点一律写"某地/某村"，人名脱敏用"某某"。
+3. 【痛点+细分类型】正文要按给定【用户痛点】和【案件细分类型】定向写作：先戳中村民的痛点（如"村集体账目不透明""投票把权益投没了"），再讲真实案情，最后点出法律态度（如"村规民约再大，也大不过法律"）。
+4. 【结尾留言引导】正文之后必须写"评论区互动"留言引导：一句话、提问式、有钩子，风格参考给定的话术池。
+5. 口语化、有冲突感、有具体数字和细节，像讲身边事；不夸大金额、不编造细节。
 
-输出格式（严格按此格式，每个案例一段）：
+输出格式（严格按此格式）：
 入库编号：xxx
 标题：xxx（一句抓眼球的话）
-正文：xxx（150~250字，分2-4句）
-评论区互动：xxx（一句话提问）"""
+正文：xxx（150~250字）
+评论区互动：xxx（一句话留言引导）"""
 
 USER_PROMPT_TMPL = """请参考以下2篇范例的风格与格式（口吻、结构、互动话术）：
 
@@ -61,16 +63,26 @@ USER_PROMPT_TMPL = """请参考以下2篇范例的风格与格式（口吻、结
 范例2：
 {example2}
 
-现在根据以下真实案例（人民法院案例库入库编号、案情、裁判要旨均为官方原文），撰写1篇口播文案：
+现在根据以下真实案例（人民法院案例库入库编号/官方链接可查，案情、裁判要旨为官方原文），
+按【痛点】和【细分类型】撰写1篇纯口播文案：
 
 入库编号：{rule_code}
 案名：{title}
+案件细分类型：{subtype}
+对应用户痛点：{pain_points}
 审理法院：{court}
 裁判文书号：{doc_no}
 涉及金额：{amount}
+官方可查链接：{official_link}
 基本案情：{facts}
 裁判理由：{reasoning}
 裁判要旨：{gist}
+判决结果：{result}
+
+注意：判决结果以【判决结果】字段为准，不得自行推断或夸大金额；正文提及金额、判决内容必须与判决结果、基本案情一致。
+
+留言引导话术池（结尾的"评论区互动"从中选一条，或按同样风格自拟）：
+{cta_pool}
 """
 
 
@@ -102,18 +114,26 @@ def generate_with_llm(case: Case, cfg: dict) -> dict | None:
 
     ex1 = "\n".join(f"{k}：{v}" for k, v in STYLE_EXAMPLES[0].items())
     ex2 = "\n".join(f"{k}：{v}" for k, v in STYLE_EXAMPLES[1].items())
+    cta_pool = "\n".join(f"- {c}" for c in SCENARIO_CTAS.get(case.scenario, REFERENCE_CTAS))
+    pain_points = "；".join(PAIN_POINTS.get(p, p) for p in (case.pain_points or [])) or "村民对集体分配不公的普遍担忧"
+    subtype = case.subtype or case.scenario or "农村集体资产纠纷"
 
     user_prompt = USER_PROMPT_TMPL.format(
         example1=ex1,
         example2=ex2,
         rule_code=case.rule_code,
         title=case.title,
+        subtype=subtype,
+        pain_points=pain_points,
         court=case.court,
         doc_no=case.doc_no,
         amount=case.amount,
+        official_link=case.official_link or "（见入库编号，可在人民法院案例库检索）",
         facts=case.facts,
         reasoning=case.reasoning,
         gist=case.gist,
+        result=case.result or "（见裁判要旨）",
+        cta_pool=cta_pool,
     )
 
     try:

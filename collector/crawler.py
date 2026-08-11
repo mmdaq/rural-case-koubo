@@ -24,7 +24,8 @@ from .extrastore import ExtraStore
 from .models import Case
 from .sources import RMFYALK_SEARCH, COURT_GOV_AGRICULTURE, SEARCH_ENGINES
 from utils.logger import get_logger
-from utils.validator import verify_case
+from utils.validator import verify_case, is_official_url
+from generator.painpoints import enrich_case
 
 log = get_logger("collector")
 
@@ -43,6 +44,7 @@ TOPIC_HINTS = [
     "集体经济组织", "征地", "征收补偿", "土地承包", "集体收益", "分红",
     "成员资格", "宅基地", "村规民约", "外嫁女", "村民小组", "村委会",
     "股权证", "承包地", "安置补助", "青苗", "入市", "集体资产",
+    "责任田", "入赘", "收益分配",
 ]
 
 
@@ -85,10 +87,14 @@ def fetch_court_gov(**kwargs) -> list[Case]:
             court="最高人民法院发布涉农民事典型案例（案例4）",
             province="某试点地区",
             scenario="分配方案",
+            subtype="集体收益分配方案（无地/少地成员）",
+            pain_points=["民主决策虚置", "信息不对称"],
             amount="1651.42万元",
             facts=text[:600],
             reasoning="分配方案占用全体成员共有的集体收益，损害无地或少地成员权益，依法应予撤销。",
             gist="集体收益分配方案不得损害无地、少地成员的合法权益。",
+            official_link=COURT_GOV_AGRICULTURE,
+            case_source="最高院典型案例",
             source_urls=[COURT_GOV_AGRICULTURE],
             source_names=["最高人民法院官网"],
         )
@@ -286,15 +292,24 @@ def discover_new_cases(extra: ExtraStore, keywords: list, max_new: int = 10) -> 
         if c.rule_code in seen_codes:
             continue
         seen_codes.add(c.rule_code)
+        # 官方链接回填：来源为官方域名时，自动作为官方可查链接
+        if not c.official_link:
+            for u in c.source_urls:
+                if is_official_url(u):
+                    c.official_link = u
+                    break
         # 主题过滤：必须与农村/集体资产相关
         blob = (c.title or "") + (c.facts or "") + (c.gist or "")
         if not any(k in blob for k in TOPIC_HINTS):
             log.info("非农村集体资产主题，丢弃 %s | %s", c.rule_code, (c.title or "")[:30])
             continue
-        v = verify_case(c.to_dict(), min_sources=0)  # 弱校验：编号格式+内容要素+字段完整
+        # 严格校验：必须满足"官方可查锚点"（官方链接 / 编号+文书号 / 多源交叉）
+        v = verify_case(c.to_dict(), min_sources=0, require_official_anchor=True)
         if not v["ok"]:
-            log.info("提取案例未通过校验，丢弃 %s: %s", c.rule_code, v["issues"])
+            log.info("提取案例无可查锚点/未通过校验，不入库 %s: %s", c.rule_code, v["issues"])
             continue
+        # 回填痛点与细分类型
+        c = Case.from_dict(enrich_case(c.to_dict()))
         changed = extra.upsert(c)
         if changed:
             new_cases.append(c)
@@ -337,7 +352,12 @@ def collect(
             log.warning("案例探索异常（不影响主流程）: %s", e)
         # 扩展库全部案例参与候选（含历史累积）
         for d in extra.all_cases():
-            all_cases.setdefault(d["rule_code"], Case.from_dict(d))
+            # 只放行通过严格校验（官方可查锚点）的扩展案例
+            v = verify_case(d, min_sources=0, require_official_anchor=True)
+            if not v["ok"]:
+                log.info("扩展库案例缺少可查锚点，跳过: %s %s", d.get("rule_code"), v["issues"])
+                continue
+            all_cases.setdefault(d["rule_code"], Case.from_dict(enrich_case(d)))
 
     # 3. 内置种子兜底（人工核实，优先于自动提取的同编号案例）
     if use_fallback:

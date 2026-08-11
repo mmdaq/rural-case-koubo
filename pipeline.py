@@ -15,6 +15,7 @@ from collector.crawler import collect
 from collector.extrastore import ExtraStore
 from collector.models import Case
 from generator.llm import generate_script
+from generator.painpoints import enrich_case
 from mailer.sender import send_email
 from utils.dedup import SeenStore
 from utils.logger import get_logger
@@ -64,18 +65,23 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
     )
     log.info("采集到案例 %d 个", len(cases))
 
-    # 2. 真伪核查（软校验：不合格案例记录问题但仍保留，避免误杀真实案例；内容残缺的线索案例丢弃）
+    # 2. 真伪核查（严格：不满足"官方可查锚点"或内容残缺的一律丢弃，防止杜撰/无法核实的案例流出）
     verify_cfg = cfg.get("verify", {})
     min_src = int(verify_cfg.get("min_independent_sources", 1))
+    strict = bool(verify_cfg.get("strict", True))
+    require_anchor = bool(verify_cfg.get("require_official_anchor", True))
     valid: list[Case] = []
     for c in cases:
-        v = verify_case(c.to_dict(), min_sources=min_src)
+        v = verify_case(c.to_dict(), min_sources=min_src, require_official_anchor=require_anchor)
         # 内容残缺（无案情/无裁判要旨/案情过短）的线索案例直接丢弃，防止生成垃圾文案
         if not (c.facts or "").strip() or len(c.facts) < 50 or not (c.gist or "").strip():
             log.info("丢弃内容残缺案例 %s", c.rule_code)
             continue
         if not v["ok"]:
-            log.warning("案例 %s 存在瑕疵（保留）: %s", c.rule_code, v["issues"])
+            if strict:
+                log.warning("丢弃未通过核查案例 %s: %s", c.rule_code, v["issues"])
+                continue
+            log.warning("案例 %s 存在瑕疵（非严格模式保留）: %s", c.rule_code, v["issues"])
         valid.append(c)
 
     # 3. 查重去重
@@ -96,9 +102,10 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
         candidates = fresh + [d for d in all_dicts if d not in fresh]
     scripts = []
     for d in candidates[:count]:
-        case = Case.from_dict(d)
+        enriched = enrich_case(d)
+        case = Case.from_dict(enriched)
         s = generate_script(case, cfg.get("llm", {}))
-        s["case"] = d
+        s["case"] = enriched
         scripts.append(s)
 
     if not scripts:
@@ -134,25 +141,34 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
 
 
 def render_markdown(scripts: list, date_str: str) -> str:
-    """渲染每日文案 markdown"""
+    """渲染每日文案 markdown（纯口播文案：编号/链接单独一行置于标题前，结尾留言引导）"""
     lines = [
         f"# 农村集体资产案例口播文案（{date_str}）",
         "",
-        "> 案例来源：人民法院案例库（rmfyalk.court.gov.cn），入库编号均经核查。",
+        "> 案例参考来源：人民法院案例库（rmfyalk.court.gov.cn）+ 最高人民法院发布的典型案例。",
+        "> 每个案例均标注可查的入库编号/官方链接，编号可在人民法院案例库检索核实，案例均为真实案件，非杜撰。",
         "",
     ]
     for i, s in enumerate(scripts, 1):
         c = s.get("case", {})
+        ref_lines = [f"入库编号：{s['rule_code']}"]
+        if c.get("official_link"):
+            ref_lines.append(f"官方链接：{c['official_link']}")
+        source_line = f"（案例：{c.get('title', '')}"
+        if c.get("subtype"):
+            source_line += f" | 细分：{c['subtype']}"
+        srcs = c.get("source_names", []) or ["内置种子"]
+        source_line += f" | 来源：{', '.join(srcs)}）"
         lines += [
             f"## 文案{i}",
             "",
-            f"入库编号：{s['rule_code']}",
+            *ref_lines,
             f"标题：{s['title']}",
             f"正文：{s['body']}",
             "",
             f"评论区互动：{s['cta']}",
             "",
-            f"（案例：{c.get('title', '')} | 来源：{', '.join(c.get('source_names', [])) or '内置种子'}）",
+            source_line,
             "",
             "---",
             "",

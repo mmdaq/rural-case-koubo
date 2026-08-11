@@ -4,6 +4,7 @@
 """
 import random
 from collector.models import Case
+from generator.painpoints import SCENARIO_CTAS, DEFAULT_CTAS, PAIN_POINTS
 
 # ---------------- 开场句（按主题场景） ----------------
 OPENERS = {
@@ -42,6 +43,17 @@ OPENERS = {
 }
 DEFAULT_OPENER = "人民法院案例库收录了一起农村集体资产的真实案例。"
 
+# ---------------- 痛点开场钩子（按痛点定向切入） ----------------
+PAIN_HOOKS = {
+    "信息不对称": "村集体的家底你知道多少？征地款、分红、租金进了谁的口袋，很多村民根本看不见。",
+    "民主决策虚置": "村里的钱怎么分，有些人连会都没开过、票都没投过，就被一纸方案定了。",
+    "问题合同泛滥": "一亩地一年几块钱，一签就是几十年——这种合同你村有吗？",
+    "证据毁灭取证难": "十几年的老账，票据、合同、会议记录全都不在，这钱还怎么算？",
+    "群体性矛盾复杂": "村里分钱，有人拿得多、有人一分没有，凭啥？",
+    "报复与压制": "告村里怕被穿小鞋，赢了官司怕输了日子——可该你的钱，不能就这么算了。",
+    "执行落地难": "判决赢了，钱却一直执行不回来，这种情况你见过吗？",
+}
+
 # ---------------- 案情连接句 ----------------
 FACT_LINKS = [
     "事情是这样的：",
@@ -69,47 +81,6 @@ GIST_UPGRADE = [
     "集体资产是全体成员的，谁也不能用一纸决议把它私分。",
 ]
 
-# ---------------- 评论区互动（按主题场景） ----------------
-CTAS = {
-    "离婚妇女": [
-        "你们村有没有'离婚就不给分钱'的规矩？评论区说出来，我帮你看看合不合法。",
-        "离了婚就被村里'除名'的，评论区举个手。",
-    ],
-    "外嫁女": [
-        "你是外嫁女吗？分到钱了吗？评论区聊聊，我教你咋维权。",
-        "嫁出去就不给分钱的村规，你见过吗？评论区说说。",
-    ],
-    "外嫁女·股权证": [
-        "你们村发股权证了吗？有没有人被'漏'掉？评论区说说。",
-    ],
-    "承包方消亡继承": [
-        "家里老人去世后征地款被扣下的，评论区举个手，我告诉你哪些能要回来。",
-        "老人走了，村里的钱该不该给？评论区聊聊你的看法。",
-    ],
-    "分配方案": [
-        "你们村分集体收益，是按人头还是按地？评论区聊聊，我帮你看看公不公平。",
-        "没地的人分不到钱，这种事你们村有吗？评论区说说。",
-    ],
-    "养女资格": [
-        "村里有没有用'不是亲生的'为由不给分钱的？评论区说说，我帮你判断该不该维权。",
-        "收养、入赘、挂户的人被村里排挤，你见过吗？评论区聊聊。",
-    ],
-    "户籍迁出": [
-        "为了孩子上学迁户口的人，你们村有没有被区别对待？评论区说说。",
-        "户口迁走几年，回来就不算村里人了？评论区聊聊你遇到的情况。",
-    ],
-    "征地补偿": [
-        "你们村的征地款是按什么标准分的？评论区聊聊。",
-        "征地补偿名单上没有你的名字？评论区说说，我帮你看看该不该维权。",
-    ],
-    "承包地纠纷": [
-        "你们村的承包地合同，有没有说不清道不明的？评论区聊聊。",
-        "承包地的事，村里一句话就能改？评论区说说你的经历。",
-    ],
-}
-DEFAULT_CTA = "这个案例你怎么看？评论区聊聊，我帮你分析。"
-
-
 def _shorten(text: str, limit: int = 90) -> str:
     """压缩裁判要旨为口语短句（截断 + 去书面腔，不以句号结尾，由模板补标点）"""
     t = (text or "").strip().lstrip("：:，,。 ").replace("\n", "").rstrip("。；;")
@@ -125,16 +96,26 @@ def generate_script(case: Case, style_no: int = 0) -> dict:
     opener = rnd.choice(OPENERS.get(scenario, [DEFAULT_OPENER])).format(
         court=case.court or "法院"
     )
+    pain_hook = ""
+    for p in (case.pain_points or []):
+        hook = PAIN_HOOKS.get(p)
+        if hook:
+            pain_hook = hook
+            break
+    if pain_hook:
+        opener = f"{pain_hook}{opener}"
     fact_link = rnd.choice(FACT_LINKS)
     facts = (case.facts or "").strip().replace("\n", "")
-    judge = f"法院判决支持了{('原告' if not case.amount else '当事人')}的主张，该给的钱，一分不能少"
-    if case.amount:
-        judge = f"法院判得干脆：{case.amount}，必须给"
+    # 判决结果必须来自案例记录（result 字段），严禁按涉及金额自行推断
+    if (case.result or "").strip():
+        judge = case.result.strip().rstrip("。；;")
+    else:
+        judge = "法院依法作出裁判，该给的钱，一分不能少"
     judgment = rnd.choice(JUDGMENT_TMPLS).format(judge=judge)
     gist_short = _shorten(case.gist)
     legal = rnd.choice(LEGAL_GISTS).format(gist_short=gist_short)
     upgrade = rnd.choice(GIST_UPGRADE)
-    cta = rnd.choice(CTAS.get(scenario, [DEFAULT_CTA]))
+    cta = rnd.choice(SCENARIO_CTAS.get(scenario, DEFAULT_CTAS))
 
     title_hook = {
         "离婚妇女": [

@@ -12,10 +12,15 @@ class Case:
     doc_no: str = ""          # 裁判文书号
     province: str = ""        # 省份
     scenario: str = ""        # 主题标签：离婚妇女/外嫁女/继承/分配方案/户籍/养女…
+    subtype: str = ""         # 案件细分类型（七类）：征地补偿款分配争议/外嫁女成员资格…
+    pain_points: list = field(default_factory=list)  # 对应用户痛点标签（信息不对称/民主决策虚置/…）
     amount: str = ""          # 涉及金额（用于文案增强）
     facts: str = ""           # 基本案情
     reasoning: str = ""       # 裁判理由
     gist: str = ""            # 裁判要旨
+    result: str = ""          # 判决结果（真实裁判结论，禁止模板/LLM自行推断金额）
+    official_link: str = ""   # 官方可查链接（法院官网/court.gov.cn/案例库原文，无则留空）
+    case_source: str = ""     # 案例参考来源：人民法院案例库 / 最高院典型案例 / 网络转载
     source_urls: list = field(default_factory=list)
     source_names: list = field(default_factory=list)
     collected_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))

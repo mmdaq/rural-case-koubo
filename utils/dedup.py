@@ -43,6 +43,9 @@ class SeenStore:
 
     def is_seen(self, rule_code: str, title: str = "") -> bool:
         if not rule_code:
+            # 无入库编号（如仅官方链接的最高院典型案例）：以标题哈希为键
+            rule_code = f"no-code:{title_hash(title)}" if title else ""
+        if not rule_code:
             return False
         rec = self.data["cases"].get(rule_code)
         if rec is None:
@@ -53,6 +56,10 @@ class SeenStore:
         return True
 
     def mark_seen(self, rule_code: str, title: str = ""):
+        if not rule_code:
+            rule_code = f"no-code:{title_hash(title)}" if title else ""
+        if not rule_code:
+            return
         self.data["cases"][rule_code] = {
             "title_hash": title_hash(title) if title else "",
             "pushed_at": datetime.now().isoformat(timespec="seconds"),

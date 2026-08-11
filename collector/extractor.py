@@ -10,7 +10,7 @@ import re
 
 from .models import Case
 from utils.logger import get_logger
-from utils.validator import DOC_NO_RE
+from utils.validator import DOC_NO_RE, is_official_url
 
 log = get_logger("extractor")
 
@@ -33,9 +33,14 @@ SCENARIO_RULES = [
     ("养女资格", ["养女", "收养", "抱养"]),
     ("承包方消亡继承", ["去世", "死亡", "逝世", "继承", "青苗补偿"]),
     ("户籍迁出", ["户籍迁出", "户口迁出", "非本村村民"]),
+    ("加入取得·入赘", ["入赘", "招婿", "上门女婿", "婚入", "与女方家庭共同生活"]),
+    ("分配方案", ["收益分配方案", "分配方案", "入市"]),
     ("征地补偿", ["征地补偿", "征收补偿", "安置补助", "土地征收"]),
     ("承包地纠纷", ["土地承包经营权合同", "承包经营权合同纠纷", "承包地", "土地承包"]),
-    ("分配方案", ["收益分配方案", "分配方案", "入市"]),
+    ("村务公开", ["村务公开", "知情权", "查账", "公开集体资产"]),
+    ("资金侵占", ["侵占集体", "挪用集体", "贪污", "白条入账"]),
+    ("问题合同", ["超长期", "超低价", "民主议定程序", "补充协议书", "越权签订"]),
+    ("集体资产租赁", ["租金", "厂房", "商铺", "租赁合同", "转租"]),
 ]
 
 # 省级行政区（用于从法院名推断省份）
@@ -64,8 +69,15 @@ def _find_section(text: str, start_kw: str, end_kws: list) -> str:
     return re.sub(r"\s+", "", seg)
 
 
-def _extract_title(text: str, html_title: str = "") -> str:
-    """案名：优先编号后紧跟的案名，其次'xxx诉xxx案'，页面标题兜底"""
+def _extract_title(text: str, html_title: str = "", code_pos: int = -1) -> str:
+    """案名：优先取编号前最近的'xxx诉xxx案'（页面标题区），其次编号后，页面标题兜底"""
+    before = text[:code_pos] if code_pos >= 0 else text
+    # 编号前取最后一个'xxx诉xxx纠纷案'（即本案例标题区）
+    m = None
+    for mm in re.finditer(r"([\u4e00-\u9fa5A-Za-z]{2,10}?诉[^，。\n]{4,50}?纠纷案)", before):
+        m = mm
+    if m:
+        return m.group(1)
     m = re.search(r"入库编号\s*\d{4}-\d{2}-\d{1,2}-\d{3}-\d{3}\s*([^\s，。]{5,80}?案)", text)
     if m:
         return m.group(1)
@@ -109,8 +121,14 @@ def _extract_amount(text: str) -> str:
 
 
 def _extract_court(text: str) -> str:
-    m = re.search(r"([\u4e00-\u9fa5]{2,20}?(?:高级|中级|基层)?人民法院)", text)
-    return m.group(1) if m else ""
+    """提取法院名：优先带审级的全称，过滤'请求人民法院'等非法院名匹配"""
+    cands = re.findall(r"([\u4e00-\u9fa5]{2,20}?(?:高级|中级|基层)?人民法院)", text)
+    valid = [c for c in cands if not c.startswith(("请求", "向"))]
+    for pref in ("高级", "中级", "基层"):
+        for c in valid:
+            if pref in c:
+                return c
+    return valid[0] if valid else ""
 
 
 def _extract_doc_no(text: str) -> str:
@@ -124,27 +142,42 @@ def _extract_from_text(text: str, html_title: str = "", url: str = "", source_na
     if not code_m:
         return None
     rule_code = code_m.group(0)
+    # 编号前为本案例标题区，编号后为正文区（法院/文书号/案情只从正文区提取，防止串案）
+    body_text = text[code_m.end():]
 
-    title = _extract_title(text, html_title)
-    keywords = _find_section(text, "关键词", _SECTION_ENDS["keywords"])
-    facts = _find_section(text, "基本案情", _SECTION_ENDS["facts"])
-    reasoning = _find_section(text, "裁判理由", _SECTION_ENDS["reasoning"])
-    gist = _find_section(text, "裁判要旨", _SECTION_ENDS["gist"])
+    title = _extract_title(text, html_title, code_pos=code_m.start())
+    keywords = _find_section(body_text, "关键词", _SECTION_ENDS["keywords"])
+    facts = _find_section(body_text, "基本案情", _SECTION_ENDS["facts"])
+    reasoning = _find_section(body_text, "裁判理由", _SECTION_ENDS["reasoning"])
+    gist = _find_section(body_text, "裁判要旨", _SECTION_ENDS["gist"])
+    result = ""
+    for kw in ("裁判结果", "生效裁判", "判决结果"):
+        result = _find_section(body_text, kw, _SECTION_ENDS["gist"])
+        if result:
+            break
 
     if not facts:
-        facts = text[:600]
+        facts = body_text[:600]
     if not gist:
-        gist = text[-300:]
+        gist = body_text[-300:]
 
-    court = _extract_court(text)
-    doc_no = _extract_doc_no(text)
-    scenario = _extract_scenario(text)
-    province = _extract_province(text, court)
+    court = _extract_court(body_text)
+    doc_no = _extract_doc_no(body_text)
+    scenario = _extract_scenario(title + body_text)
+    province = _extract_province(body_text, court)
     amount = _extract_amount(facts)
 
     if len(facts) < 50:
         log.info("文本块过短，无法提取有效案情: %s", url)
         return None
+
+    official_link = url if is_official_url(url) else ""
+    if "典型案例" in (html_title + title):
+        case_source = "最高院典型案例"
+    elif "案例库" in (source_name + html_title) or "rmfyalk" in (url or ""):
+        case_source = "人民法院案例库"
+    else:
+        case_source = "网络转载"
 
     return Case(
         rule_code=rule_code,
@@ -158,6 +191,9 @@ def _extract_from_text(text: str, html_title: str = "", url: str = "", source_na
         facts=facts[:2000],
         reasoning=reasoning[:1000] if reasoning else "",
         gist=gist[:800] if gist else "",
+        result=result[:500] if result else "",
+        official_link=official_link,
+        case_source=case_source,
         source_urls=[url] if url else [],
         source_names=[source_name] if source_name else ["网络转载"],
     )
@@ -200,7 +236,8 @@ def extract_cases_multi(html: str, url: str = "", source_name: str = "") -> list
     cases = []
     for i, pos in enumerate(positions):
         end = positions[i + 1] if i + 1 < len(positions) else len(text)
-        start = max(0, pos - 120)  # 编号前留足空间以包含案名
+        # 编号前留标题区（案名在编号前），正文区自编号起，避免串案
+        start = max(0, pos - 160)
         block = text[start:end]
         case = _extract_from_text(block, html_title, url, source_name)
         if case:
