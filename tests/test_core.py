@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.dedup import SeenStore, title_hash
+from collector.extrastore import CrawlStore
 from utils.validator import (
     check_doc_no,
     check_rule_code,
@@ -117,6 +118,18 @@ class TestSelection(unittest.TestCase):
         codes = [d["rule_code"] for d in picked]
         self.assertNotIn("2024-07-2-044-002", codes)
         self.assertEqual(len(codes), 5)
+
+
+class TestCrawlStore(unittest.TestCase):
+    def test_mark_and_persist(self):
+        path = os.path.join(tempfile.mkdtemp(), "crawled.json")
+        cs = CrawlStore(path)
+        self.assertFalse(cs.is_crawled("https://a.example/x"))
+        cs.mark_crawled("https://a.example/x")
+        self.assertTrue(cs.is_crawled("https://a.example/x"))
+        # 重新加载后仍记得（持久化）
+        cs2 = CrawlStore(path)
+        self.assertTrue(cs2.is_crawled("https://a.example/x"))
 
 
 class TestOfficialAnchor(unittest.TestCase):

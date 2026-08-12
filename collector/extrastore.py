@@ -67,3 +67,42 @@ class ExtraStore:
 
     def stats(self) -> dict:
         return {"total": len(self.data["cases"])}
+
+
+class CrawlStore:
+    """已抓取 URL 记录（持久化到 data/crawled_urls.json，随仓库提交）
+
+    用途：每次运行只抓取"没抓过"的新页面，避免反复抓同一批页面，
+    让每日自动采集聚焦新内容，案例池持续扩容。
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        self.urls: set[str] = set()
+        self._load()
+
+    def _load(self):
+        if os.path.exists(self.path):
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self.urls = set(data.get("urls", []))
+            except (json.JSONDecodeError, OSError) as e:
+                log.warning("已抓URL记录读取失败，重建: %s", e)
+                self.urls = set()
+
+    def _save(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"urls": sorted(self.urls)}, f, ensure_ascii=False, indent=2)
+
+    def is_crawled(self, url: str) -> bool:
+        return url in self.urls
+
+    def mark_crawled(self, url: str):
+        if url not in self.urls:
+            self.urls.add(url)
+            self._save()
+
+    def stats(self) -> dict:
+        return {"total": len(self.urls)}

@@ -12,7 +12,7 @@ import os
 from datetime import datetime
 
 from collector.crawler import collect
-from collector.extrastore import ExtraStore
+from collector.extrastore import ExtraStore, CrawlStore
 from collector.models import Case
 from generator.llm import generate_script
 from generator.painpoints import enrich_case
@@ -97,12 +97,14 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
     storage = cfg.get("storage", {})
     seen = SeenStore(os.path.join(base, storage.get("seen_file", "data/seen_cases.json")))
     extra = ExtraStore(os.path.join(base, storage.get("extra_file", "data/extra_cases.json")))
+    crawled = CrawlStore(os.path.join(base, storage.get("crawled_file", "data/crawled_urls.json")))
 
     # 1. 采集（含自我扩充：搜索→提取→写扩展库）
     coll = cfg.get("collector", {})
     cases = collect(
         keywords=coll.get("keywords", []),
         extra=extra,
+        crawled=crawled,
         use_fallback=coll.get("use_fallback", True),
         max_cases=int(coll.get("max_cases_per_day", 20)),
     )

@@ -17,7 +17,7 @@ from urllib.parse import urljoin
 
 from .extractor import extract_case, extract_cases_multi
 from .fallback import SEED_CASES
-from .extrastore import ExtraStore
+from .extrastore import ExtraStore, CrawlStore
 from .models import Case
 from .sources import RMFYALK_SEARCH, COURT_GOV_AGRICULTURE, SEARCH_ENGINES
 from utils.logger import get_logger
@@ -105,6 +105,9 @@ def fetch_court_gov(**kwargs) -> list[Case]:
 # 人工核实的案例库原文/专题页面（multi=True 表示一页含多个案例，如澎湃"一网一库"专题）
 SEED_LINKS = [
     {"url": "https://m.thepaper.cn/newsDetail_forward_32405836", "name": "澎湃·一网一库专题第61期", "multi": True},
+    {"url": "https://www.zhongliaolvshi.com/zhongliaoshuofa/3526.html", "name": "中辽律师·成员资格认定案例解析", "multi": True},
+    {"url": "https://www.zhongliaolvshi.com/zhongliaoshuofa/3528.html", "name": "中辽律师·成员资格认定案例解析", "multi": True},
+    {"url": "http://jingsongls.com/jsyw/1226.html", "name": "京讼律师·户籍非唯一因素案例", "multi": False},
     {"url": "https://www.taxdy.cn/h-nd-293634.html", "name": "税递网案例库原文", "multi": False},
     {"url": "https://www.taxdy.cn/h-nd-294941.html", "name": "税递网案例库原文", "multi": False},
     {"url": "https://www.taxdy.cn/h-nd-295450.html", "name": "税递网案例库原文", "multi": False},
@@ -114,14 +117,18 @@ SEED_LINKS = [
 ]
 
 
-def fetch_seed_links() -> list[Case]:
+def fetch_seed_links(crawled: CrawlStore | None = None) -> list[Case]:
     """抓预置链接池（含一页多案例页面）"""
     found: list[Case] = []
     for item in SEED_LINKS:
         try:
+            if crawled and crawled.is_crawled(item["url"]):
+                continue
             html = _safe_get(item["url"], timeout=15)
             if not html:
                 continue
+            if crawled:
+                crawled.mark_crawled(item["url"])
             if item.get("multi"):
                 cases = extract_cases_multi(html, item["url"], item["name"])
             else:
@@ -145,7 +152,7 @@ FEED_SOURCES = [
         "url": "https://www.taxdy.cn/h-nr--0_865_520.html",
         "link_pattern": "h-nd-",
         "page_param": "m31pageno",
-        "max_pages": 40,
+        "max_pages": 60,
         # 该栏目全部为人民法院案例库内容，无需标题预过滤，扩大案例池
         "prefilter": False,
     },
@@ -154,7 +161,7 @@ FEED_SOURCES = [
         "url": "https://m.055110.com/fl/3/",
         "link_pattern": "fl/3/",
         "page_param": None,
-        "max_pages": 2,
+        "max_pages": 3,
         "prefilter": True,
     },
 ]
@@ -186,10 +193,11 @@ def _list_title_relevant(title: str) -> bool:
     return any(k in title for k in TOPIC_HINTS)
 
 
-def fetch_feeds(max_fetch: int = 50) -> list[Case]:
+def fetch_feeds(crawled: CrawlStore | None = None, max_fetch: int = 150) -> list[Case]:
     """抓转载源列表页（支持分页）→遍历全部链接做标题预过滤→详情页→提取案例
 
-    翻页收集大量链接，但只抓取标题命中涉农关键词的详情页（max_fetch 控制抓取上限）。
+    翻页收集大量链接，按源配置决定是否标题预过滤；max_fetch 控制每源抓取上限，
+    已抓过的详情页（crawled 记录）跳过，聚焦新内容。
     """
     found: list[Case] = []
     seen_urls: set[str] = set()
@@ -214,6 +222,8 @@ def fetch_feeds(max_fetch: int = 50) -> list[Case]:
             for url, title in detail_links:
                 if url in seen_urls:
                     continue
+                if crawled and crawled.is_crawled(url):
+                    continue
                 if prefilter and not _list_title_relevant(title):
                     continue
                 if fetched >= max_fetch:
@@ -223,6 +233,8 @@ def fetch_feeds(max_fetch: int = 50) -> list[Case]:
                 html = _safe_get(url, timeout=15)
                 if not html:
                     continue
+                if crawled:
+                    crawled.mark_crawled(url)
                 case = extract_case(html, url, source_name=src["name"])
                 if case:
                     found.append(case)
@@ -251,7 +263,12 @@ def _search_result_links(query: str, max_links: int = 6) -> list[str]:
     return list(dict.fromkeys(links))[:max_links]
 
 
-def fetch_search_web(keywords: list, max_pages: int = 2, per_page: int = 5) -> list[Case]:
+def fetch_search_web(
+    keywords: list,
+    crawled: CrawlStore | None = None,
+    max_pages: int = 2,
+    per_page: int = 5,
+) -> list[Case]:
     """搜索引擎检索→抓全文→提取案例（结果质量依赖网络环境）"""
     found: list[Case] = []
     seen_urls: set[str] = set()
@@ -260,10 +277,14 @@ def fetch_search_web(keywords: list, max_pages: int = 2, per_page: int = 5) -> l
         for url in links:
             if url in seen_urls:
                 continue
+            if crawled and crawled.is_crawled(url):
+                continue
             seen_urls.add(url)
             html = _safe_get(url, timeout=12)
             if not html:
                 continue
+            if crawled:
+                crawled.mark_crawled(url)
             case = extract_case(html, url, source_name="搜索引擎")
             if case:
                 found.append(case)
@@ -273,22 +294,28 @@ def fetch_search_web(keywords: list, max_pages: int = 2, per_page: int = 5) -> l
 
 # ---------------- 自我扩充主入口 ----------------
 
-def discover_new_cases(extra: ExtraStore, keywords: list, max_new: int = 10) -> list[Case]:
+def discover_new_cases(
+    extra: ExtraStore,
+    keywords: list,
+    crawled: CrawlStore | None = None,
+    max_new: int = 10,
+) -> list[Case]:
     """探索并入库新案例：预置链接 → 转载源翻页 → 搜索引擎 → 主题过滤 → 校验 → 写扩展库
 
     返回本次【新入库】的案例列表（已存在扩展库的编号只累计来源数）。
+    crawled 记录已抓过的页面，每日只抓新内容，持续扩容。
     """
     discovered: list[Case] = []
     try:
-        discovered += fetch_seed_links()
+        discovered += fetch_seed_links(crawled)
     except Exception as e:
         log.warning("预置链接采集异常: %s", e)
     try:
-        discovered += fetch_feeds()
+        discovered += fetch_feeds(crawled)
     except Exception as e:
         log.warning("转载源采集异常: %s", e)
     try:
-        discovered += fetch_search_web(keywords)
+        discovered += fetch_search_web(keywords, crawled)
     except Exception as e:
         log.warning("搜索引擎采集异常: %s", e)
 
@@ -331,6 +358,7 @@ def discover_new_cases(extra: ExtraStore, keywords: list, max_new: int = 10) -> 
 def collect(
     keywords: list,
     extra: ExtraStore | None = None,
+    crawled: CrawlStore | None = None,
     use_fallback: bool = True,
     max_cases: int = 20,
 ) -> list[Case]:
@@ -353,7 +381,7 @@ def collect(
     # 2. 自我扩充：探索新案例并写入扩展库
     if extra is not None:
         try:
-            discover_new_cases(extra, keywords)
+            discover_new_cases(extra, keywords, crawled)
         except Exception as e:
             log.warning("案例探索异常（不影响主流程）: %s", e)
         # 扩展库全部案例参与候选（含历史累积）

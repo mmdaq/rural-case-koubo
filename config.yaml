@@ -79,3 +79,5 @@ storage:
   seen_file: "data/seen_cases.json"
   # 自动探索发现的新案例扩展库（每日累积）
   extra_file: "data/extra_cases.json"
+  # 已抓取 URL 记录（每日只抓新页面，持续扩容）
+  crawled_file: "data/crawled_urls.json"
