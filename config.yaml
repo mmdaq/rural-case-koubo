@@ -54,6 +54,10 @@ collector:
 generator:
   # 每天生成的文案篇数
   count_per_day: 5
+  # 冷却期（天）：同一案例推送后，N 天内不再选入每日5篇
+  cooldown_days: 7
+  # 最小间隔（天）：案例池不足时的最后兜底，也不得复用最近 N 天推送过的案例
+  min_gap_days: 1
   # 输出目录
   output_dir: "data/output"
   # 是否在邮件中附带文案 markdown 附件

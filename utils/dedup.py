@@ -1,4 +1,4 @@
-"""查重去重：基于入库编号 + 标题归一化的持久化去重库"""
+"""查重去重：基于入库编号（唯一键）的持久化去重库，支持冷却期轮换选材"""
 import hashlib
 import json
 import os
@@ -20,7 +20,11 @@ def title_hash(title: str) -> str:
 
 
 class SeenStore:
-    """记录已推送案例，防止重复。结构：{"cases": {rule_code: {title_hash, pushed_at}}}"""
+    """记录已推送案例与推送时间。结构：{"cases": {rule_code: {title_hash, pushed_at}}}
+
+    同一入库编号即视为同一案例（入库编号是人民法院案例库的唯一标识），
+    不再用标题差异区分，避免同案不同标题绕过去重。
+    """
 
     def __init__(self, path: str):
         self.path = path
@@ -47,13 +51,21 @@ class SeenStore:
             rule_code = f"no-code:{title_hash(title)}" if title else ""
         if not rule_code:
             return False
+        return rule_code in self.data["cases"]
+
+    def last_pushed_at(self, rule_code: str, title: str = "") -> datetime | None:
+        """返回该案例最近一次推送时间（未推送过返回 None）"""
+        if not rule_code:
+            rule_code = f"no-code:{title_hash(title)}" if title else ""
+        if not rule_code:
+            return None
         rec = self.data["cases"].get(rule_code)
-        if rec is None:
-            return False
-        # 同编号但标题差异很大（如合并案件），视为不同案例
-        if title and rec.get("title_hash") != title_hash(title):
-            return False
-        return True
+        if not rec:
+            return None
+        try:
+            return datetime.fromisoformat(rec.get("pushed_at", ""))
+        except (ValueError, TypeError):
+            return None
 
     def mark_seen(self, rule_code: str, title: str = ""):
         if not rule_code:

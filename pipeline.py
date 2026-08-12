@@ -17,11 +17,54 @@ from collector.models import Case
 from generator.llm import generate_script
 from generator.painpoints import enrich_case
 from mailer.sender import send_email
-from utils.dedup import SeenStore
+from utils.dedup import SeenStore, title_hash
 from utils.logger import get_logger
 from utils.validator import verify_case
 
 log = get_logger("pipeline")
+
+
+def _select_candidates(
+    cases: list,
+    seen: SeenStore,
+    count: int,
+    cooldown_days: int = 7,
+    min_gap_days: int = 1,
+) -> list:
+    """轮换选材，保证每日文案尽量独立不重复：
+
+    优先级：
+    1. 从未推送过的案例；
+    2. 推送时间已超过冷却期（cooldown_days）的案例，最早推送的优先；
+    3. 冷却期内但不在最近 min_gap_days 的案例，最早推送的优先；
+    4. 兜底：案例池严重不足时，才复用最近推送过的案例。
+
+    因此只要案例池充足，同一案例不会连续两天（甚至更久）重复出现。
+    """
+    unseen: list[dict] = []
+    outside: list[tuple] = []
+    inside: list[tuple] = []
+    gap: list[tuple] = []
+    for d in cases:
+        pushed = seen.last_pushed_at(d.get("rule_code", ""), d.get("title", ""))
+        if pushed is None:
+            unseen.append(d)
+            continue
+        days = (datetime.now() - pushed).days
+        if days >= cooldown_days:
+            outside.append((pushed, d))
+        elif days < min_gap_days:
+            gap.append((pushed, d))
+        else:
+            inside.append((pushed, d))
+
+    def by_oldest(bucket: list) -> list:
+        return [x[1] for x in sorted(bucket, key=lambda x: x[0])]
+
+    # 最近推送过的案例（gap）仅在基础池不足时才补位，且同一案例不会在一批内重复
+    base = unseen + by_oldest(outside) + by_oldest(inside)
+    ordered = base + by_oldest(gap)
+    return ordered[:count]
 
 
 def _load_config() -> dict:
@@ -84,22 +127,18 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
             log.warning("案例 %s 存在瑕疵（非严格模式保留）: %s", c.rule_code, v["issues"])
         valid.append(c)
 
-    # 3. 查重去重
-    fresh = seen.dedup([c.to_dict() for c in valid])
-    if not fresh:
-        log.warning("今日无新案例（全部已推送或采集失败），使用种子案例重跑")
-        fresh = seen.dedup([c.to_dict() for c in valid]) or [
-            c.to_dict() for c in valid if c.rule_code
-        ][: int(coll.get("max_cases_per_day", 20))]
-
-    # 4. 生成文案（每案例 1 篇，按配置取前 N 篇；不足时用全部候选补足，保证每日产出）
+    # 3. 选材：去重 + 冷却期轮换（未推送优先 → 冷却期外最早 → 冷却期内最早 → 兜底复用）
     gen_cfg = cfg.get("generator", {})
     count = int(gen_cfg.get("count_per_day", 5))
-    candidates = fresh
+    cooldown_days = int(gen_cfg.get("cooldown_days", 7))
+    min_gap_days = int(gen_cfg.get("min_gap_days", 1))
+    all_dicts = [c.to_dict() for c in valid]
+    candidates = _select_candidates(all_dicts, seen, count, cooldown_days, min_gap_days)
     if len(candidates) < count:
-        log.warning("新案例仅 %d 个，不足 %d 篇，用全部案例补足（含已推送）", len(candidates), count)
-        all_dicts = [c.to_dict() for c in valid]
-        candidates = fresh + [d for d in all_dicts if d not in fresh]
+        log.warning("候选案例不足 %d 篇（案例池 %d 个），本轮仅推送 %d 篇",
+                    count, len(all_dicts), len(candidates))
+
+    # 4. 生成文案（每案例 1 篇）
     scripts = []
     for d in candidates[:count]:
         enriched = enrich_case(d)

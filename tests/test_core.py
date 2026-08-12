@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -16,7 +17,7 @@ from utils.validator import (
     verify_case,
 )
 from generator.painpoints import enrich_case
-from pipeline import render_markdown
+from pipeline import _select_candidates, render_markdown
 
 
 class TestValidator(unittest.TestCase):
@@ -67,8 +68,8 @@ class TestDedup(unittest.TestCase):
         self.assertFalse(store.is_seen("2024-07-2-044-004", "蔡某珠案"))
         store.mark_seen("2024-07-2-044-004", "蔡某珠案")
         self.assertTrue(store.is_seen("2024-07-2-044-004", "蔡某珠案"))
-        # 同编号不同标题视为不同案例
-        self.assertFalse(store.is_seen("2024-07-2-044-004", "另一个标题"))
+        # 同编号即同一案例，标题差异不再影响去重
+        self.assertTrue(store.is_seen("2024-07-2-044-004", "另一个标题"))
 
     def test_seen_store_no_code(self):
         """无入库编号（仅官方链接的最高院典型案例）以标题哈希为键"""
@@ -76,6 +77,46 @@ class TestDedup(unittest.TestCase):
         store = SeenStore(tmp)
         store.mark_seen("", "最高人民法院涉农民事典型案例")
         self.assertTrue(store.is_seen("", "最高人民法院涉农民事典型案例"))
+
+
+class TestSelection(unittest.TestCase):
+    def _store_with_pushed(self, pushed_map: dict):
+        """pushed_map: {rule_code: 距今天数}"""
+        tmp = os.path.join(tempfile.mkdtemp(), "seen.json")
+        store = SeenStore(tmp)
+        now = datetime.now()
+        for code, days in pushed_map.items():
+            store.mark_seen(code, f"案{code}")
+            store.data["cases"][code]["pushed_at"] = (now - timedelta(days=days)).isoformat()
+        return store
+
+    def test_recently_pushed_not_reselected_when_pool_enough(self):
+        """昨天推送过的案例，在有足够未推送案例时不再选入"""
+        store = self._store_with_pushed({c: 1 for c in "ABCDE"})
+        cases = [{"rule_code": c, "title": f"案{c}"} for c in "ABCDEFGHIJKLM"]
+        picked = _select_candidates(cases, store, 5, cooldown_days=7, min_gap_days=1)
+        codes = [d["rule_code"] for d in picked]
+        self.assertEqual(sorted(codes), sorted("FGHIJ"))
+
+    def test_rotation_oldest_first_after_cooldown(self):
+        """冷却期外的案例按最久未推送优先轮换，最近推送的兜底"""
+        store = self._store_with_pushed({"A": 10, "B": 10, "C": 8, "D": 8, "E": 1, "F": 1})
+        cases = [{"rule_code": c, "title": f"案{c}"} for c in "ABCDEF"]
+        picked = _select_candidates(cases, store, 5, cooldown_days=7, min_gap_days=1)
+        codes = [d["rule_code"] for d in picked]
+        self.assertEqual(codes[:4], ["A", "B", "C", "D"])
+        self.assertEqual(len(codes), 5)
+
+    def test_no_repeat_same_code_different_title(self):
+        """同入库编号即使标题不同也算同一案例；有替代案例时不重复选它"""
+        store = SeenStore(os.path.join(tempfile.mkdtemp(), "seen.json"))
+        store.mark_seen("2024-07-2-044-002", "游某乙诉某村第二村民小组案")
+        cases = [{"rule_code": "2024-07-2-044-002", "title": "游某甲、游某乙诉某村第二村民小组案"}]
+        cases += [{"rule_code": c, "title": f"案{c}"} for c in "ABCDEFGHIJKLM"]
+        picked = _select_candidates(cases, store, 5, cooldown_days=7, min_gap_days=1)
+        codes = [d["rule_code"] for d in picked]
+        self.assertNotIn("2024-07-2-044-002", codes)
+        self.assertEqual(len(codes), 5)
 
 
 class TestOfficialAnchor(unittest.TestCase):

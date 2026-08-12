@@ -15,9 +15,6 @@ import re
 import time
 from urllib.parse import urljoin
 
-import requests
-from bs4 import BeautifulSoup
-
 from .extractor import extract_case, extract_cases_multi
 from .fallback import SEED_CASES
 from .extrastore import ExtraStore
@@ -44,12 +41,13 @@ TOPIC_HINTS = [
     "集体经济组织", "征地", "征收补偿", "土地承包", "集体收益", "分红",
     "成员资格", "宅基地", "村规民约", "外嫁女", "村民小组", "村委会",
     "股权证", "承包地", "安置补助", "青苗", "入市", "集体资产",
-    "责任田", "入赘", "收益分配",
+    "责任田", "入赘", "收益分配", "经营权", "承包金", "成员权益",
 ]
 
 
 def _safe_get(url: str, timeout: int = 15) -> str | None:
     try:
+        import requests
         resp = requests.get(url, headers=HEADERS, timeout=timeout)
         resp.encoding = resp.apparent_encoding or "utf-8"
         if resp.status_code == 200:
@@ -73,6 +71,7 @@ def fetch_rmfyalk(keywords: list) -> list[Case]:
 
 def fetch_court_gov(**kwargs) -> list[Case]:
     """最高人民法院官网涉农民事典型案例"""
+    from bs4 import BeautifulSoup
     html = _safe_get(COURT_GOV_AGRICULTURE)
     if not html:
         return []
@@ -146,20 +145,24 @@ FEED_SOURCES = [
         "url": "https://www.taxdy.cn/h-nr--0_865_520.html",
         "link_pattern": "h-nd-",
         "page_param": "m31pageno",
-        "max_pages": 30,
+        "max_pages": 40,
+        # 该栏目全部为人民法院案例库内容，无需标题预过滤，扩大案例池
+        "prefilter": False,
     },
     {
         "name": "安徽律师网·民事参考案例",
         "url": "https://m.055110.com/fl/3/",
         "link_pattern": "fl/3/",
         "page_param": None,
-        "max_pages": 1,
+        "max_pages": 2,
+        "prefilter": True,
     },
 ]
 
 
 def _extract_detail_links(list_html: str, pattern: str | None, base_url: str = "") -> list[tuple[str, str]]:
     """从列表页提取详情链接（支持相对路径），返回 [(url, 标题文本)]"""
+    from bs4 import BeautifulSoup
     soup = BeautifulSoup(list_html, "html.parser")
     links = []
     for a in soup.find_all("a", href=True):
@@ -183,7 +186,7 @@ def _list_title_relevant(title: str) -> bool:
     return any(k in title for k in TOPIC_HINTS)
 
 
-def fetch_feeds(per_source: int = 8, max_fetch: int = 30) -> list[Case]:
+def fetch_feeds(max_fetch: int = 50) -> list[Case]:
     """抓转载源列表页（支持分页）→遍历全部链接做标题预过滤→详情页→提取案例
 
     翻页收集大量链接，但只抓取标题命中涉农关键词的详情页（max_fetch 控制抓取上限）。
@@ -193,6 +196,7 @@ def fetch_feeds(per_source: int = 8, max_fetch: int = 30) -> list[Case]:
     for src in FEED_SOURCES:
         max_pages = int(src.get("max_pages", 1))
         page_param = src.get("page_param")
+        prefilter = bool(src.get("prefilter", True))
         try:
             detail_links: list[tuple[str, str]] = []
             for page_no in range(1, max_pages + 1):
@@ -210,7 +214,7 @@ def fetch_feeds(per_source: int = 8, max_fetch: int = 30) -> list[Case]:
             for url, title in detail_links:
                 if url in seen_urls:
                     continue
-                if not _list_title_relevant(title):
+                if prefilter and not _list_title_relevant(title):
                     continue
                 if fetched >= max_fetch:
                     break
@@ -233,6 +237,8 @@ def fetch_feeds(per_source: int = 8, max_fetch: int = 30) -> list[Case]:
 
 def _search_result_links(query: str, max_links: int = 6) -> list[str]:
     """搜索引擎检索，返回结果页链接（过滤搜索引擎自身域名）"""
+    import requests
+    from bs4 import BeautifulSoup
     html = _safe_get(SEARCH_ENGINES["bing"].format(q=requests.utils.quote(query)))
     if not html:
         return []

@@ -2,8 +2,6 @@
 import json
 import re
 
-import requests
-
 from generator import template
 from generator.painpoints import PAIN_POINTS, SCENARIO_CTAS, REFERENCE_CTAS
 from collector.models import Case
@@ -137,6 +135,7 @@ def generate_with_llm(case: Case, cfg: dict) -> dict | None:
     )
 
     try:
+        import requests
         resp = requests.post(
             f"{cfg.get('base_url', 'https://api.deepseek.com').rstrip('/')}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},

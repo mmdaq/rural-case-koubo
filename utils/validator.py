@@ -56,12 +56,19 @@ def missing_fields(case: dict, skip: tuple = ()) -> list:
     return missing
 
 
-def content_plausible(case: dict) -> bool:
-    """正文是否包含案例要素关键词（粗筛，防无关内容混入）"""
+def content_plausible(case: dict, official_anchor_ok: bool = False) -> bool:
+    """正文是否包含案例要素关键词（粗筛，防无关内容混入）。
+
+    已具备官方可查锚点（入库编号+裁判文书号/官方链接）的真实案例，
+    只需 1 个要素关键词即可放行，避免误杀提取不完整的真实案例。
+    """
     blob = "".join(
         str(case.get(k, "")) for k in ("facts", "reasoning", "gist", "title")
     )
-    return sum(h in blob for h in CONTENT_HINTS) >= 2
+    hits = sum(h in blob for h in CONTENT_HINTS)
+    if hits >= 2:
+        return True
+    return official_anchor_ok and hits >= 1
 
 
 def domain(url: str) -> str:
@@ -108,6 +115,7 @@ def verify_case(case: dict, min_sources: int = 1, require_official_anchor: bool 
     issues = []
 
     code_ok = check_rule_code(case.get("rule_code", ""))
+    has_anchor, anchor_kind = official_anchor(case)
     if not code_ok and not (case.get("official_link") or "").strip():
         issues.append(f"入库编号格式非法: {case.get('rule_code')}")
     if not check_doc_no(case.get("doc_no", "")):
@@ -119,7 +127,7 @@ def verify_case(case: dict, min_sources: int = 1, require_official_anchor: bool 
     missing = missing_fields(case, skip=skip)
     if missing:
         issues.append(f"缺少必填字段: {missing}")
-    if not content_plausible(case):
+    if not content_plausible(case, official_anchor_ok=has_anchor):
         issues.append("正文缺少案例要素关键词，疑似非案例内容")
 
     n_src = independent_sources(case)
@@ -127,7 +135,6 @@ def verify_case(case: dict, min_sources: int = 1, require_official_anchor: bool 
         issues.append(f"独立来源仅 {n_src} 个，低于阈值 {min_sources}")
 
     if require_official_anchor:
-        has_anchor, anchor_kind = official_anchor(case)
         if not has_anchor:
             issues.append(
                 "缺少官方可查锚点：需提供官方链接（案例库/最高院/政府法院官网），"
