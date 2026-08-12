@@ -73,6 +73,14 @@ verify:
   # 官方可查锚点必检：官方链接（案例库/最高院/政府法院官网）
   # 或 入库编号+裁判文书号，或 入库编号+≥2个独立来源，三选一
   require_official_anchor: true
+  # 官网在线核对：入库编号必须在人民法院案例库官网（rmfyalk.court.gov.cn）
+  # 检索得到才允许推送。Token 从环境变量 RMFYALK_TOKEN 读取（GitHub Secrets 配置）。
+  online:
+    # 配置了 Token 后，官网核对不可用（Token 失效/网络异常）时是否终止任务：
+    # true  = 宁可当天不发，也不推送未经官网核对的文案（推荐）
+    # false = 降级为锚点校验并告警
+    require: true
+    timeout: 20
 
 storage:
   # 已推送案例去重库

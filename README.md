@@ -54,6 +54,18 @@ rural-case-koubo/
 4. **纯口播文案**：只输出 标题 + 正文 + 评论区互动（留言引导）。案例核查信息以"入库编号/官方链接"行呈现在标题前，不混入分析、说明类内容。
 5. **判决结果不杜撰**：涉及金额、判决内容一律以案例记录中的 `result`（判决结果）字段为准，模板与 LLM 均禁止自行推断。
 
+## 官网在线核对（推荐开启）
+
+除锚点校验外，推送前会**逐案到人民法院案例库官网（rmfyalk.court.gov.cn）按入库编号检索核对**：
+
+- 官网查得到 → 该案文案自动带上官网详情链接（可点击核实）；
+- 官网查不到 → 该案例直接拦截、不推送（防止编号抄错或杜撰）；
+- Token 失效或官网不可达 → 默认终止本轮任务，不发送未经核对的文案（`verify.online.require: true`）。
+
+启用方法：浏览器登录案例库官网 → F12 → 网络面板 → 发起一次检索，
+复制请求头 `faxin-cpws-al-token` 的值，在仓库 Settings → Secrets and variables → Actions
+新建 secret：`RMFYALK_TOKEN`（粘贴该 Token）。Token 过期后重新获取更新即可。
+
 ## 自我扩充机制（每日自动探索新案例）
 
 案例池 = **内置种子（8个人工核实） + 扩展案例库（自动发现累积）**，每日运行按三层探索：
@@ -153,6 +165,7 @@ docker run -d --name rck -v $(pwd)/data:/app/data --env-file .env rural-case-kou
 | `MAIL_AUTH_CODE` | QQ邮箱SMTP授权码（16位） | ✅ |
 | `MAIL_RECEIVERS` | 收件邮箱，多个用英文逗号分隔 | ✅ |
 | `LLM_API_KEY` | DeepSeek API Key（提升文案质量） | 可选 |
+| `RMFYALK_TOKEN` | 人民法院案例库官网登录 Token（开启逐案官网核对，推荐） | 可选(推荐) |
 
 **② 手动测试一次**
 

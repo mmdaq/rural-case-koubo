@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 
+import requests
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.dedup import SeenStore, title_hash
@@ -21,6 +23,13 @@ from utils.validator import (
 from collector.fallback import SEED_CASES
 from generator.painpoints import enrich_case
 from pipeline import _select_candidates, render_markdown
+from unittest import mock
+
+from utils.online_verify import (
+    OnlineVerifyUnavailable,
+    verify_cases,
+    verify_rule_code,
+)
 
 
 class TestValidator(unittest.TestCase):
@@ -115,6 +124,79 @@ class TestThemeFilter(unittest.TestCase):
             "gist": "征地补偿款分配不得损害成员权益。",
         }
         self.assertTrue(is_rural_collective_theme(case))
+
+
+class TestOnlineVerify(unittest.TestCase):
+    def _mock_post(self, payload):
+        m = mock.Mock()
+        m.json.return_value = payload
+        return m
+
+    def test_found(self):
+        resp = self._mock_post({
+            "code": 0,
+            "data": {
+                "totalCount": 1,
+                "datas": [{
+                    "cpws_al_id": "abc123",
+                    "cpws_al_no": "2024-07-2-044-005",
+                    "title": "张某梅诉某村民小组案",
+                }],
+            },
+        })
+        with mock.patch("utils.online_verify.requests.post", return_value=resp) as p:
+            r = verify_rule_code("2024-07-2-044-005", "fake-token")
+        self.assertTrue(r["found"])
+        self.assertIn("content.html?id=abc123", r["official_url"])
+        self.assertEqual(r["official_no"], "2024-07-2-044-005")
+        body = p.call_args.kwargs["json"]
+        self.assertEqual(body["searchParams"]["cpws_al_no"], "2024-07-2-044-005")
+        self.assertEqual(p.call_args.kwargs["headers"]["faxin-cpws-al-token"], "fake-token")
+
+    def test_not_found(self):
+        resp = self._mock_post({"code": 0, "data": {"totalCount": 0, "datas": []}})
+        with mock.patch("utils.online_verify.requests.post", return_value=resp):
+            r = verify_rule_code("2024-07-2-044-999", "fake-token")
+        self.assertFalse(r["found"])
+
+    def test_token_expired_raises(self):
+        resp = self._mock_post({"code": 401, "msg": "未登录"})
+        with mock.patch("utils.online_verify.requests.post", return_value=resp):
+            with self.assertRaises(OnlineVerifyUnavailable):
+                verify_rule_code("2024-07-2-044-005", "bad-token")
+
+    def test_network_error_raises(self):
+        with mock.patch(
+            "utils.online_verify.requests.post",
+            side_effect=requests.ConnectionError("conn reset"),
+        ):
+            with self.assertRaises(OnlineVerifyUnavailable):
+                verify_rule_code("2024-07-2-044-005", "fake-token")
+
+    def test_batch_filters_not_found(self):
+        def fake_post(url, **kwargs):
+            code = kwargs["json"]["searchParams"]["cpws_al_no"]
+            if code == "OK-001":
+                return self._mock_post({
+                    "code": 0,
+                    "data": {
+                        "totalCount": 1,
+                        "datas": [{"cpws_al_id": "id1", "cpws_al_no": code, "title": "真实案例"}],
+                    },
+                })
+            return self._mock_post({"code": 0, "data": {"totalCount": 0, "datas": []}})
+
+        cases = [
+            {"rule_code": "OK-001", "title": "案A"},
+            {"rule_code": "BAD-002", "title": "案B"},
+        ]
+        with mock.patch("utils.online_verify.requests.post", side_effect=fake_post):
+            passed, rejected, unavailable = verify_cases(cases, "fake-token", delay=0)
+        self.assertFalse(unavailable)
+        self.assertEqual(len(passed), 1)
+        self.assertTrue(passed[0]["official_verified"])
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0]["rule_code"], "BAD-002")
 
 
 class TestDedup(unittest.TestCase):

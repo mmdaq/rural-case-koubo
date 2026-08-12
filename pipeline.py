@@ -133,6 +133,33 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
             log.warning("案例 %s 存在瑕疵（非严格模式保留）: %s", c.rule_code, v["issues"])
         valid.append(c)
 
+    # 2.5 官网在线核对：入库编号必须在人民法院案例库官网可查到，查不到一律拦截
+    token = os.getenv("RMFYALK_TOKEN", "").strip()
+    online_cfg = verify_cfg.get("online", {}) or {}
+    if token:
+        from utils.online_verify import verify_cases
+
+        valid_dicts = [c.to_dict() for c in valid]
+        passed_dicts, rejected, unavailable = verify_cases(
+            valid_dicts,
+            token,
+            timeout=int(online_cfg.get("timeout", 20)),
+        )
+        require_online = bool(online_cfg.get("require", True))
+        if unavailable:
+            if require_online:
+                log.error(
+                    "官网在线核对不可用且配置要求强制核对（verify.online.require=true），"
+                    "本轮终止，不发送未经官网核对的文案"
+                )
+                return {"ok": False, "scripts": [], "reason": "online_verify_unavailable"}
+            log.warning("官网在线核对不可用，降级为锚点校验（存在编号不可查风险），请检查 RMFYALK_TOKEN")
+        else:
+            for r in rejected:
+                log.info("拦截未通过官网核对的案例: %s | %s", r["rule_code"], r["title"])
+            log.info("官网核对通过 %d 个，拦截 %d 个", len(passed_dicts), len(rejected))
+            valid = [Case.from_dict(d) for d in passed_dicts]
+
     # 3. 选材：去重 + 冷却期轮换（未推送优先 → 冷却期外最早 → 冷却期内最早 → 兜底复用）
     gen_cfg = cfg.get("generator", {})
     count = int(gen_cfg.get("count_per_day", 5))

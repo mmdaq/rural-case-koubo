@@ -41,6 +41,7 @@ jobs:
           MAIL_AUTH_CODE=${{ secrets.MAIL_AUTH_CODE }}
           MAIL_RECEIVERS=${{ secrets.MAIL_RECEIVERS }}
           LLM_API_KEY=${{ secrets.LLM_API_KEY }}
+          RMFYALK_TOKEN=${{ secrets.RMFYALK_TOKEN }}
           EOF
 
       - name: 运行主流程（采集→核查→去重→生成5篇→发邮件）

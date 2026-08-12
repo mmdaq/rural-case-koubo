@@ -20,6 +20,10 @@ class Case:
     gist: str = ""            # 裁判要旨
     result: str = ""          # 判决结果（真实裁判结论，禁止模板/LLM自行推断金额）
     official_link: str = ""   # 官方可查链接（法院官网/court.gov.cn/案例库原文，无则留空）
+    official_verified: bool = False   # 是否已在人民法院案例库官网核对通过
+    official_verify_at: str = ""      # 官网核对时间
+    official_no: str = ""             # 官网核对返回的入库编号
+    official_title: str = ""          # 官网核对返回的案例标题
     case_source: str = ""     # 案例参考来源：人民法院案例库 / 最高院典型案例 / 网络转载
     source_urls: list = field(default_factory=list)
     source_names: list = field(default_factory=list)
