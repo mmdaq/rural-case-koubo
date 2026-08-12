@@ -14,9 +14,11 @@ from utils.validator import (
     check_rule_code,
     content_plausible,
     independent_sources,
+    is_rural_collective_theme,
     official_anchor,
     verify_case,
 )
+from collector.fallback import SEED_CASES
 from generator.painpoints import enrich_case
 from pipeline import _select_candidates, render_markdown
 
@@ -57,6 +59,62 @@ class TestValidator(unittest.TestCase):
         }
         r = verify_case(case, min_sources=2)
         self.assertTrue(r["ok"], r["issues"])
+
+
+class TestThemeFilter(unittest.TestCase):
+    def test_all_seeds_pass(self):
+        """人工核实的内置种子案例必须全部通过主题过滤"""
+        failed = [s["rule_code"] for s in SEED_CASES if not is_rural_collective_theme(s)]
+        self.assertEqual(failed, [], f"种子案例被误杀: {failed}")
+
+    def test_offtopic_cases_rejected(self):
+        """刑事/劳动/环保/行政/安全保障等跑题案例必须全部拦截"""
+        off_topic = [
+            {"rule_code": "2017-18-1-156-001", "title": "指导性案例87号：郭明升、郭明锋、孙淑标假冒注册商标案",
+             "facts": "未经注册商标所有人许可，在同一种商品上使用与其注册商标相同的商标，销售金额巨大。",
+             "gist": "假冒注册商标罪。",
+             },
+            {"rule_code": "2018-18-1-286-001", "title": "指导性案例105号：洪小强、洪礼沃、洪清泉、李志荣开设赌场案",
+             "facts": "在微信群中拉人参与赌博，赌资流水三百余万元，违法所得予以没收。",
+             "gist": "开设赌场罪。",
+             },
+            {"rule_code": "2021-18-2-466-001", "title": "指导性案例173号：北京市朝阳区自然之友环境研究所诉中国水电顾问集团新平开发有限公司等生态环境保护民事公益诉讼案",
+             "facts": "水电站建设项目可能影响绿孔雀栖息地，法院判决停止建设。",
+             "gist": "生态环境保护民事公益诉讼。",
+             },
+            {"rule_code": "2022-18-1-207-003", "title": "指导性案例194号：熊昌恒等侵犯公民个人信息案",
+             "facts": "批量添加微信好友并出售微信号，违法所得二十余万元。",
+             "gist": "侵犯公民个人信息罪。",
+             },
+            {"rule_code": "2022-18-2-186-001", "title": "指导性案例179号：聂美兰诉北京林氏兄弟文化有限公司确认劳动关系案",
+             "facts": "双方签订合作设立茶叶项目协议，实际形成劳动关系。",
+             "gist": "劳动关系认定。",
+             },
+            {"rule_code": "2020-18-2-370-001", "title": "李秋月等诉广州市花都区梯面镇红山村村民委员会违反安全保障义务责任纠纷案",
+             "facts": "村民私自爬上集体所有的杨梅树采摘摔亡，家属起诉村委会索赔。",
+             "gist": "违反安全保障义务责任纠纷。",
+             },
+            {"rule_code": "2017-18-3-004-001", "title": "指导性案例88号：张道文、陶仁等诉四川省简阳市人民政府侵犯客运人力三轮车经营权案",
+             "facts": "行政机关对客运人力三轮车经营权作出限制。",
+             "gist": "行政案件。",
+             },
+            {"rule_code": "2017-18-3-006-001", "title": "指导性案例89号：\"北雁云依\"诉济南市公安局历下区分局燕山派出所公安行政登记案",
+             "facts": "父母为女儿取名\"北雁云依\"被拒绝办理户籍登记。",
+             "gist": "公安行政登记。",
+             },
+        ]
+        passed = [c["rule_code"] for c in off_topic if is_rural_collective_theme(c)]
+        self.assertEqual(passed, [], f"跑题案例被误放行: {passed}")
+
+    def test_body_fallback_accepts_rural_case(self):
+        """标题无法判断时，正文强主题词组合仍可放行真实农村集体资产案例"""
+        case = {
+            "rule_code": "2024-07-2-044-008",
+            "title": "某案例",
+            "facts": "村民小组以民主议定程序通过征地补偿款分配方案，外嫁女未能取得集体经济组织成员资格对应的份额。",
+            "gist": "征地补偿款分配不得损害成员权益。",
+        }
+        self.assertTrue(is_rural_collective_theme(case))
 
 
 class TestDedup(unittest.TestCase):

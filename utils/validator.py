@@ -28,10 +28,112 @@ REQUIRED_FIELDS = ["rule_code", "title", "facts", "reasoning", "gist", "source_u
 # 内容要素（用于判断"像不像真案例"）
 CONTENT_HINTS = ["人民法院", "判决", "征收", "补偿", "集体经济组织", "成员资格"]
 
+# ---------------- 农村集体资产主题过滤 ----------------
+# 防止"案例库真实但主题跑题"的案例混入（如刑事、劳动、环保、行政案件被误当农村集体资产案例）。
+# 判定优先级：标题命中（最严格）→ 正文强主题词+辅助词组合（兜底）。
+
+# 标题命中即放行：案件类型/客体直接指向农村集体资产
+TITLE_TOPIC_HINTS = [
+    "侵害集体经济组织成员权益",
+    "土地承包经营权",
+    "农村土地承包",
+    "集体经济组织",
+    "集体资产",
+    "集体收益",
+    "征地补偿",
+    "征收补偿",
+    "宅基地",
+    "集体土地",
+    "成员资格",
+    "村集体",
+    "承包地",
+]
+
+# 标题命中即拒绝：已知的跑题类别（防止"村民委员会"等字眼误放行非资产类纠纷）
+NEGATIVE_TITLE_HINTS = [
+    "假冒注册商标",
+    "开设赌场",
+    "侵犯公民个人信息",
+    "确认劳动关系",
+    "生态环境保护民事公益诉讼",
+    "公安行政登记",
+    "客运人力三轮车经营权",
+    "违反安全保障义务",
+    "机动车交通事故",
+    "民间借贷",
+    "买卖合同",
+    "婚姻家庭纠纷",
+    "劳动争议",
+    "侵犯著作权",
+]
+
+# 正文强主题词：命中任一即与农村集体资产强相关
+STRONG_TOPIC_HINTS = [
+    "集体经济组织成员",
+    "集体经济组织",
+    "集体收益",
+    "集体资产",
+    "征地补偿",
+    "征收补偿",
+    "土地补偿款",
+    "土地补偿费",
+    "安置补助",
+    "土地征收",
+    "外嫁女",
+    "成员资格",
+    "承包经营权",
+    "承包地",
+    "承包合同",
+    "村规民约",
+    "收益分配",
+    "股权证",
+    "青苗补偿",
+    "入赘",
+    "宅基地",
+    "责任田",
+    "村民小组",
+    "村委会",
+    "农村集体产权",
+]
+
+# 正文辅助主题词（必须与强主题词组合使用，避免"分红/征地/经营权"等泛词误判）
+AUX_TOPIC_HINTS = [
+    "分红",
+    "征地",
+    "征收",
+    "承包",
+    "补偿",
+    "村民",
+    "农村",
+    "集体",
+    "经营权",
+    "民主议定",
+    "集体经营性建设用地",
+    "成员权益",
+    "集体经济",
+    "承包金",
+    "入市",
+]
+
 
 def check_rule_code(rule_code: str) -> bool:
     """入库编号格式校验"""
     return bool(RULE_CODE_RE.match(rule_code or ""))
+
+
+def is_rural_collective_theme(case: dict) -> bool:
+    """判断案例是否属于"农村集体资产"主题（标题优先，正文强相关兜底）。"""
+    title = (case.get("title") or "").strip()
+    if any(n in title for n in NEGATIVE_TITLE_HINTS):
+        return False
+    if any(k in title for k in TITLE_TOPIC_HINTS):
+        return True
+    blob = "".join(str(case.get(k, "")) for k in ("title", "facts", "gist"))
+    strong = [k for k in STRONG_TOPIC_HINTS if k in blob]
+    if not strong:
+        return False
+    aux = [k for k in AUX_TOPIC_HINTS if k in blob]
+    return len(strong) + len(aux) >= 3
 
 
 def check_doc_no(doc_no: str) -> bool:

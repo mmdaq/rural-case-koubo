@@ -21,7 +21,7 @@ from .extrastore import ExtraStore, CrawlStore
 from .models import Case
 from .sources import RMFYALK_SEARCH, COURT_GOV_AGRICULTURE, SEARCH_ENGINES
 from utils.logger import get_logger
-from utils.validator import verify_case, is_official_url
+from utils.validator import verify_case, is_official_url, is_rural_collective_theme
 from generator.painpoints import enrich_case
 
 log = get_logger("collector")
@@ -331,9 +331,8 @@ def discover_new_cases(
                 if is_official_url(u):
                     c.official_link = u
                     break
-        # 主题过滤：必须与农村/集体资产相关
-        blob = (c.title or "") + (c.facts or "") + (c.gist or "")
-        if not any(k in blob for k in TOPIC_HINTS):
+        # 主题过滤（严格）：必须与农村/集体资产相关，防止刑事/劳动/环保等跑题案例混入
+        if not is_rural_collective_theme(c.to_dict()):
             log.info("非农村集体资产主题，丢弃 %s | %s", c.rule_code, (c.title or "")[:30])
             continue
         # 严格校验：必须满足"官方可查锚点"（官方链接 / 编号+文书号 / 多源交叉）
@@ -378,25 +377,27 @@ def collect(
         except Exception as e:
             log.warning("采集源 %s 异常: %s", fetcher.__name__, e)
 
-    # 2. 自我扩充：探索新案例并写入扩展库
+    # 2. 内置种子兜底（人工核实，先占位，保证案例池截断时种子不被挤出）
+    if use_fallback:
+        for seed in SEED_CASES:
+            all_cases[seed["rule_code"]] = Case.from_dict(seed)
+
+    # 3. 自我扩充：探索新案例并写入扩展库
     if extra is not None:
         try:
             discover_new_cases(extra, keywords, crawled)
         except Exception as e:
             log.warning("案例探索异常（不影响主流程）: %s", e)
-        # 扩展库全部案例参与候选（含历史累积）
+        # 扩展库全部案例参与候选（含历史累积）；严格主题过滤 + 官方可查锚点双闸门
         for d in extra.all_cases():
-            # 只放行通过严格校验（官方可查锚点）的扩展案例
+            if not is_rural_collective_theme(d):
+                log.info("扩展库案例非农村集体资产主题，跳过: %s %s", d.get("rule_code"), (d.get("title") or "")[:30])
+                continue
             v = verify_case(d, min_sources=0, require_official_anchor=True)
             if not v["ok"]:
                 log.info("扩展库案例缺少可查锚点，跳过: %s %s", d.get("rule_code"), v["issues"])
                 continue
             all_cases.setdefault(d["rule_code"], Case.from_dict(enrich_case(d)))
-
-    # 3. 内置种子兜底（人工核实，优先于自动提取的同编号案例）
-    if use_fallback:
-        for seed in SEED_CASES:
-            all_cases[seed["rule_code"]] = Case.from_dict(seed)
 
     cases = list(all_cases.values())
     log.info(

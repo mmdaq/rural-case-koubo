@@ -19,7 +19,7 @@ from generator.painpoints import enrich_case
 from mailer.sender import send_email
 from utils.dedup import SeenStore, title_hash
 from utils.logger import get_logger
-from utils.validator import verify_case
+from utils.validator import verify_case, is_rural_collective_theme
 
 log = get_logger("pipeline")
 
@@ -117,6 +117,10 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
     require_anchor = bool(verify_cfg.get("require_official_anchor", True))
     valid: list[Case] = []
     for c in cases:
+        # 主题闸门（兜底）：只允许农村集体资产案例进入生成，防止跑题文案外发
+        if not is_rural_collective_theme(c.to_dict()):
+            log.info("丢弃非农村集体资产主题案例 %s | %s", c.rule_code, (c.title or "")[:30])
+            continue
         v = verify_case(c.to_dict(), min_sources=min_src, require_official_anchor=require_anchor)
         # 内容残缺（无案情/无裁判要旨/案情过短）的线索案例直接丢弃，防止生成垃圾文案
         if not (c.facts or "").strip() or len(c.facts) < 50 or not (c.gist or "").strip():
