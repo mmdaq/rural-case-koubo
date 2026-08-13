@@ -60,11 +60,15 @@ rural-case-koubo/
 
 - 官网查得到 → 该案文案自动带上官网详情链接（可点击核实）；
 - 官网查不到 → 该案例直接拦截、不推送（防止编号抄错或杜撰）；
-- Token 失效或官网不可达 → 默认终止本轮任务，不发送未经核对的文案（`verify.online.require: true`）。
+- Token 失效或官网不可达 → 自动降级为"锚点校验"继续发送，并在日志中告警
+  （`verify.online.require: false`，保证每天不中断；Token 有效时仍逐案强制核对、查不到即拦截）。
 
 启用方法：浏览器登录案例库官网 → F12 → 网络面板 → 发起一次检索，
 复制请求头 `faxin-cpws-al-token` 的值，在仓库 Settings → Secrets and variables → Actions
 新建 secret：`RMFYALK_TOKEN`（粘贴该 Token）。Token 过期后重新获取更新即可。
+
+> Token 会不定期失效，属正常现象：失效当天日志会提示"官网在线核对不可用，降级为锚点校验"，
+> 文案仍会照常发送；有空时重新登录官网取新 Token 更新 Secret，即可恢复逐案在线核对。
 
 ## 自我扩充机制（每日自动探索新案例）
 

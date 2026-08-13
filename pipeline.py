@@ -159,6 +159,8 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
                 log.info("拦截未通过官网核对的案例: %s | %s", r["rule_code"], r["title"])
             log.info("官网核对通过 %d 个，拦截 %d 个", len(passed_dicts), len(rejected))
             valid = [Case.from_dict(d) for d in passed_dicts]
+    else:
+        log.warning("未配置 RMFYALK_TOKEN，本轮跳过官网在线核对，仅使用本地锚点校验")
 
     # 3. 选材：去重 + 冷却期轮换（未推送优先 → 冷却期外最早 → 冷却期内最早 → 兜底复用）
     gen_cfg = cfg.get("generator", {})
