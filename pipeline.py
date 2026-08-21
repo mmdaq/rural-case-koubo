@@ -19,6 +19,7 @@ from generator.painpoints import enrich_case
 from mailer.sender import send_email
 from utils.dedup import SeenStore, title_hash
 from utils.logger import get_logger
+from utils.state import RunState
 from utils.validator import verify_case, is_rural_collective_theme
 
 log = get_logger("pipeline")
@@ -31,40 +32,25 @@ def _select_candidates(
     cooldown_days: int = 7,
     min_gap_days: int = 1,
 ) -> list:
-    """轮换选材，保证每日文案尽量独立不重复：
+    """选材：**仅选从未推送过的案例**。
 
-    优先级：
-    1. 从未推送过的案例；
-    2. 推送时间已超过冷却期（cooldown_days）的案例，最早推送的优先；
-    3. 冷却期内但不在最近 min_gap_days 的案例，最早推送的优先；
-    4. 兜底：案例池严重不足时，才复用最近推送过的案例。
+    不复用已推送案例。如果所有案例均已推送过，返回空列表，
+    由调用方（run_pipeline）决定是发送通知还是停止推送。
 
-    因此只要案例池充足，同一案例不会连续两天（甚至更久）重复出现。
+    同一批次内不会重复选取同一案例（cases 已由 collect() 按 rule_code 去重）。
     """
     unseen: list[dict] = []
-    outside: list[tuple] = []
-    inside: list[tuple] = []
-    gap: list[tuple] = []
     for d in cases:
         pushed = seen.last_pushed_at(d.get("rule_code", ""), d.get("title", ""))
         if pushed is None:
             unseen.append(d)
-            continue
-        days = (datetime.now() - pushed).days
-        if days >= cooldown_days:
-            outside.append((pushed, d))
-        elif days < min_gap_days:
-            gap.append((pushed, d))
-        else:
-            inside.append((pushed, d))
 
-    def by_oldest(bucket: list) -> list:
-        return [x[1] for x in sorted(bucket, key=lambda x: x[0])]
+    if not unseen:
+        log.info("所有 %d 个候选案例均已推送过，无新案例可选", len(cases))
+        return []
 
-    # 最近推送过的案例（gap）仅在基础池不足时才补位，且同一案例不会在一批内重复
-    base = unseen + by_oldest(outside) + by_oldest(inside)
-    ordered = base + by_oldest(gap)
-    return ordered[:count]
+    log.info("选材：从 %d 个候选中选取 %d 个未推送案例", len(unseen), min(count, len(unseen)))
+    return unseen[:count]
 
 
 def _load_config() -> dict:
@@ -162,13 +148,71 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
     else:
         log.warning("未配置 RMFYALK_TOKEN，本轮跳过官网在线核对，仅使用本地锚点校验")
 
-    # 3. 选材：去重 + 冷却期轮换（未推送优先 → 冷却期外最早 → 冷却期内最早 → 兜底复用）
+    # 3. 选材：仅选从未推送过的案例（不复用已推送案例）
     gen_cfg = cfg.get("generator", {})
     count = int(gen_cfg.get("count_per_day", 5))
     cooldown_days = int(gen_cfg.get("cooldown_days", 7))
     min_gap_days = int(gen_cfg.get("min_gap_days", 1))
+    out_dir = os.path.join(base, gen_cfg.get("output_dir", "data/output"))
+    os.makedirs(out_dir, exist_ok=True)
+    today = datetime.now().strftime("%Y-%m-%d")
     all_dicts = [c.to_dict() for c in valid]
     candidates = _select_candidates(all_dicts, seen, count, cooldown_days, min_gap_days)
+
+    # ── 无新案例：通知 / 停止逻辑 ──
+    if not candidates:
+        state_path = os.path.join(base, storage.get("state_file", "data/run_state.json"))
+        state = RunState(state_path)
+
+        if state.stopped:
+            log.info("系统已处于停止状态（连续 %d 天无新增），跳过本次推送",
+                     state.consecutive_no_new)
+            return {"ok": True, "scripts": [], "reason": "stopped", "consecutive": state.consecutive_no_new}
+
+        # 检查是否同一天内重复触发（防止同一天多次运行导致计数暴涨）
+        last_run_date = (state.data.get("last_run") or "")[:10]
+        if last_run_date == today:
+            log.info("今天已记录过无新增，跳过重复通知")
+            return {"ok": True, "scripts": [], "reason": "already_notified_today", "consecutive": state.consecutive_no_new}
+
+        state.record_no_new()
+        notify_cfg = cfg.get("notify", {})
+        max_notify_days = int(notify_cfg.get("max_notify_days", 3))
+
+        if state.consecutive_no_new > max_notify_days:
+            state.stop()
+            log.warning("连续 %d 天无新增案例（超过阈值 %d），系统停止推送。"
+                        "如需恢复，请检查采集源配置或关键词后删除 data/run_state.json 中的 stopped 标记。",
+                        state.consecutive_no_new, max_notify_days)
+            return {"ok": True, "scripts": [], "reason": "stopped", "consecutive": state.consecutive_no_new}
+
+        # 发送通知邮件
+        notification_md = render_notification(state.consecutive_no_new, today)
+        notif_path = os.path.join(out_dir, f"通知_{today}.md") if dry_run else None
+        if notif_path:
+            with open(notif_path, "w", encoding="utf-8") as f:
+                f.write(notification_md)
+
+        sent = False
+        if not dry_run:
+            mail_cfg = cfg.get("mail", {})
+            subject = f"{mail_cfg.get('subject_prefix', '')}{today} · 无新增案例通知（连续{state.consecutive_no_new}天）"
+            body = notification_md if len(notification_md) < 40000 else notification_md[:40000]
+            sent = send_email(mail_cfg, subject, body, attach_path="")
+        else:
+            log.info("[dry-run] 跳过通知邮件发送")
+
+        log.info("已发送无新增通知（连续 %d 天），案例池 %d 个全部已推送",
+                 state.consecutive_no_new, len(all_dicts))
+        return {"ok": True, "sent": sent, "scripts": [], "reason": "no_new_cases_notification",
+                "consecutive": state.consecutive_no_new}
+
+    # ── 有新案例：重置状态计数器 ──
+    state_path = os.path.join(base, storage.get("state_file", "data/run_state.json"))
+    state = RunState(state_path)
+    if state.consecutive_no_new > 0:
+        state.reset()
+
     if len(candidates) < count:
         log.warning("候选案例不足 %d 篇（案例池 %d 个），本轮仅推送 %d 篇",
                     count, len(all_dicts), len(candidates))
@@ -187,9 +231,6 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
         return {"ok": False, "scripts": []}
 
     # 5. 渲染 markdown 并落盘
-    today = datetime.now().strftime("%Y-%m-%d")
-    out_dir = os.path.join(base, gen_cfg.get("output_dir", "data/output"))
-    os.makedirs(out_dir, exist_ok=True)
     md_path = os.path.join(out_dir, f"口播文案_{today}.md")
     md_text = render_markdown(scripts, today)
     with open(md_path, "w", encoding="utf-8") as f:
@@ -212,6 +253,34 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
         log.info("[dry-run] 跳过邮件发送")
 
     return {"ok": True, "sent": sent, "scripts": scripts, "md_path": md_path}
+
+
+def render_notification(consecutive: int, date_str: str) -> str:
+    """渲染无新增案例通知 markdown"""
+    lines = [
+        f"# ⚠️ 无新增案例通知（{date_str}）",
+        "",
+        f"**这是连续第 {consecutive} 天未发现新的农村集体资产案例。**",
+        "",
+        "## 当前状态",
+        "",
+        "- 案例池中所有案例均已推送过",
+        "- 采集源（预置链接 / 转载源翻页 / 搜索引擎）未发现新的可采集页面",
+        "- 系统不会重复推送已推送过的案例",
+        "",
+        "## 建议操作",
+        "",
+        "1. **检查关键词**：`config.yaml` → `collector.keywords`，是否需要调整检索词？",
+        "2. **扩充采集源**：`collector.crawler.py` → `FEED_SOURCES` / `SEED_LINKS`，添加新的转载栏目或案例库页面",
+        "3. **检查网络环境**：采集依赖外部网站可达性，某些站点可能需要登录或变更 URL",
+        "4. **手动添加种子案例**：在 `collector/fallback.py` → `SEED_CASES` 中补充人工核实的真实案例",
+        "",
+        f"---",
+        "",
+        f"📌 连续 {consecutive} 天无新增后系统将自动停止推送。恢复方式：修复采集源后删除 `data/run_state.json` 中的 `stopped` 标记即可。",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def render_markdown(scripts: list, date_str: str) -> str:

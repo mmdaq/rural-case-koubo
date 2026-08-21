@@ -31,8 +31,8 @@ llm:
   timeout: 60
 
 collector:
-  # 每日采集上限
-  max_cases_per_day: 20
+  # 每日采集上限（候选池截断上限；实际池子 < 50 时全部返回，不截断）
+  max_cases_per_day: 100
   # 采集数据源开关（全部失败时自动使用内置种子案例）
   sources:
     rmfyalk: true            # 人民法院案例库官网（需登录态，通常失败）
@@ -55,13 +55,19 @@ generator:
   # 每天生成的文案篇数
   count_per_day: 5
   # 冷却期（天）：同一案例推送后，N 天内不再选入每日5篇
+  # 注意：当前设置为仅推送未推送过的案例，冷却期参数已失效
   cooldown_days: 7
   # 最小间隔（天）：案例池不足时的最后兜底，也不得复用最近 N 天推送过的案例
+  # 注意：当前设置为仅推送未推送过的案例，此参数已失效
   min_gap_days: 1
   # 输出目录
   output_dir: "data/output"
   # 是否在邮件中附带文案 markdown 附件
   attach_file: true
+
+notify:
+  # 连续无新增案例时的最大通知天数（超过后停止推送）
+  max_notify_days: 3
 
 verify:
   # 真伪核查：同一案例至少出现在几个独立域名来源才算可信
@@ -89,3 +95,5 @@ storage:
   extra_file: "data/extra_cases.json"
   # 已抓取 URL 记录（每日只抓新页面，持续扩容）
   crawled_file: "data/crawled_urls.json"
+  # 运行状态：连续无新增天数 / 停止标记
+  state_file: "data/run_state.json"

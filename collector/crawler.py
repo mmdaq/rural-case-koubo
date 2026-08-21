@@ -404,4 +404,9 @@ def collect(
         "候选案例池共 %d 个（扩展库 %d 个）",
         len(cases), extra.stats()["total"] if extra else 0,
     )
-    return cases[:max_cases]
+    # 截断上限：防止池子过大时 _select_candidates 遍历过多
+    # 但不要截断太小：案例池 < 30 时全部返回，否则每日 5 篇很快循环完
+    if len(cases) > max(max_cases, 50):
+        # 按来源优先级截断：种子 > 官方源 > 扩展库（扩展库按插入顺序取）
+        return cases[:max(max_cases, 50)]
+    return cases

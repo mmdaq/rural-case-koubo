@@ -12,7 +12,7 @@ log = get_logger("dedup")
 
 def _norm_title(title: str) -> str:
     """标题归一化：去标点空格，便于相似标题比对"""
-    return re.sub(r"[\s\u3000，。、（）()：:；;！？!?\"'“”‘’\-—]", "", title or "")
+    return re.sub(r"[\s\u3000，。、（）()：:；;！？!?\"'""''—-]", "", title or "")
 
 
 def title_hash(title: str) -> str:
