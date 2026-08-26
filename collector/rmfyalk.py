@@ -75,9 +75,12 @@ def _search(keyword: str, token: str, page: int = 1, size: int = 20,
 
 
 def _content(cpws_al_id: str, token: str, timeout: int = 20) -> dict:
-    """取案例正文（基本案情 jbaq / 裁判理由 cply / 裁判要旨 cpyz 等）"""
+    """取案例正文（基本案情 jbaq / 裁判理由 cply / 裁判要旨 cpyz 等）
+
+    与官网前端一致：POST {gid: <搜索返回的已编码id>}，不要二次编码
+    """
     resp = requests.post(
-        CONTENT_API, json={"id": cpws_al_id},
+        CONTENT_API, json={"gid": cpws_al_id},
         headers=_auth_headers(token), timeout=timeout,
     )
     data = resp.json()
@@ -85,7 +88,11 @@ def _content(cpws_al_id: str, token: str, timeout: int = 20) -> dict:
         raise RmfyalkUnavailable(f"案例库 Token 无效或已过期: {data.get('msg')}")
     if data.get("code") != 0:
         raise RmfyalkUnavailable(f"详情接口异常: code={data.get('code')} msg={data.get('msg')}")
-    return data.get("data") or {}
+    outer = data.get("data") or {}
+    # 官网返回结构：{code, msg, data: {isCanBrowse, data: {案例正文字段...}}}
+    if isinstance(outer, dict) and isinstance(outer.get("data"), dict):
+        return outer["data"]
+    return outer
 
 
 def _pick(d: dict, *keys: str) -> str:
@@ -95,6 +102,21 @@ def _pick(d: dict, *keys: str) -> str:
         if isinstance(v, str) and v.strip():
             return v.strip()
     return ""
+
+
+def _clean(text: str) -> str:
+    """去掉检索高亮 <em> 标签与 HTML 标记，保留正文"""
+    import re
+    text = re.sub(r"</?(?:em|span|b|p)[^>]*>", "", text or "")
+    return text.strip()
+
+
+def _strip_html(text: str) -> str:
+    """详情接口返回的正文带 <p> 段落标签，转纯文本"""
+    import re
+    text = re.sub(r"<[^>]+>", "\n", text or "")
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return "".join(lines) if lines else ""
 
 
 def harvest_rmfyalk(keywords: list[str], crawled=None, max_fetch: int = 60,
@@ -128,9 +150,10 @@ def harvest_rmfyalk(keywords: list[str], crawled=None, max_fetch: int = 60,
                 for item in datas:
                     if fetched >= max_fetch:
                         break
+                    # 注意：搜索返回的 id 已是 URL 编码形态，原样使用
                     cid = _pick(item, "cpws_al_id", "id")
                     code = _pick(item, "cpws_al_no")
-                    title = _pick(item, "title", "cpws_al_name")
+                    title = _clean(_pick(item, "cpws_al_title", "title", "cpws_al_name"))
                     if not cid or cid in seen_ids:
                         continue
                     if title_filter and title and not title_filter(title):
@@ -142,17 +165,21 @@ def harvest_rmfyalk(keywords: list[str], crawled=None, max_fetch: int = 60,
 
                     d = _content(cid, token)
                     time.sleep(delay)
-                    facts = _pick(d, "cpws_al_jbaq", "jbaq")
-                    gist = _pick(d, "cpws_al_cpyz", "cpyz")
-                    reasoning = _pick(d, "cpws_al_cply", "cply")
-                    result = _pick(d, "cpws_al_cpjg", "cpjg")
+                    facts = _strip_html(_pick(d, "cpws_al_jbaq", "jbaq"))
+                    gist = _strip_html(_pick(d, "cpws_al_cpyz", "cpyz") or _pick(item, "cpws_al_cpyz"))
+                    reasoning = _strip_html(_pick(d, "cpws_al_cply", "cply"))
+                    result = _strip_html(_pick(d, "cpws_al_cpjg", "cpjg"))
                     if not code:
                         code = _pick(d, "cpws_al_no")
                     if not title:
-                        title = _pick(d, "title", "cpws_al_name")
+                        title = _clean(_pick(d, "cpws_al_title", "title", "cpws_al_name"))
                     case = Case(
                         rule_code=code,
                         title=title,
+                        keywords=[],
+                        court=_pick(item, "cpws_al_slfy_name"),
+                        doc_no=_pick(item, "cpws_al_ajzh"),
+                        province=_pick(item, "cpws_al_slfy_sf_name"),
                         facts=facts or result[:600],
                         gist=gist,
                         reasoning=reasoning,
