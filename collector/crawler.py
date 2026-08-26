@@ -375,6 +375,7 @@ def discover_new_cases(
     search_result_pages: int = 2,
     rmfyalk_keywords_per_day: int = 4,
     rmfyalk_pages_per_keyword: int = 2,
+    rmfyalk_keywords: list | None = None,
 ) -> list[Case]:
     """探索并入库新案例：官方库 → 预置链接 → 转载源翻页 → 搜索引擎 → 主题过滤 → 校验 → 写扩展库
 
@@ -384,14 +385,17 @@ def discover_new_cases(
     discovered: list[Case] = []
     try:
         # 官方案例库：权威结构化数据，优先采集（Token 失效自动跳过）
+        # 官库检索词用短主题词；结果不做过标题预过滤——"诉政府不履行
+        # 征地补偿职责"这类标题无涉农关键词但正文切题，交给后续
+        # 正文主题闸门把关，避免误杀
         from .rmfyalk import harvest_rmfyalk
-        picked_kw = pick_daily_keywords(keywords, rmfyalk_keywords_per_day)
+        rk = rmfyalk_keywords or keywords
+        picked_kw = pick_daily_keywords(rk, rmfyalk_keywords_per_day)
         log.info("官方库本轮检索关键词（按日轮换 %d/%d）：%s",
-                 rmfyalk_keywords_per_day, len(keywords), picked_kw)
+                 rmfyalk_keywords_per_day, len(rk), picked_kw)
         discovered += harvest_rmfyalk(
             picked_kw, crawled,
             pages_per_keyword=rmfyalk_pages_per_keyword,
-            title_filter=_list_title_relevant,
         )
     except Exception as e:
         log.warning("官方案例库采集异常: %s", e)
@@ -458,6 +462,9 @@ def collect(
     feed_max_fetch: int = 150,
     search_keywords_per_day: int = 4,
     search_result_pages: int = 2,
+    rmfyalk_keywords: list | None = None,
+    rmfyalk_keywords_per_day: int = 12,
+    rmfyalk_pages_per_keyword: int = 1,
 ) -> list[Case]:
     """主采集：探索新案例 → 扩展库 → 种子，汇总去重返回
 
@@ -490,6 +497,9 @@ def collect(
                 feed_max_fetch=feed_max_fetch,
                 search_keywords_per_day=search_keywords_per_day,
                 search_result_pages=search_result_pages,
+                rmfyalk_keywords=rmfyalk_keywords,
+                rmfyalk_keywords_per_day=rmfyalk_keywords_per_day,
+                rmfyalk_pages_per_keyword=rmfyalk_pages_per_keyword,
             )
         except Exception as e:
             log.warning("案例探索异常（不影响主流程）: %s", e)        # 扩展库案例按"最新发现优先"参与候选：截断时优先保留新入库案例，

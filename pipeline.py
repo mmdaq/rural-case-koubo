@@ -137,6 +137,9 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
         feed_max_fetch=int(disc.get("feed_max_fetch", 150)),
         search_keywords_per_day=int(disc.get("search_keywords_per_day", 4)),
         search_result_pages=int(disc.get("search_result_pages", 2)),
+        rmfyalk_keywords=coll.get("rmfyalk_keywords") or None,
+        rmfyalk_keywords_per_day=int(coll.get("rmfyalk_keywords_per_day", 12)),
+        rmfyalk_pages_per_keyword=int(coll.get("rmfyalk_pages_per_keyword", 1)),
     )
     log.info("采集到案例 %d 个", len(cases))
 
