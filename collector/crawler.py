@@ -373,13 +373,28 @@ def discover_new_cases(
     feed_max_fetch: int = 150,
     search_keywords_per_day: int = 4,
     search_result_pages: int = 2,
+    rmfyalk_keywords_per_day: int = 4,
+    rmfyalk_pages_per_keyword: int = 2,
 ) -> list[Case]:
-    """探索并入库新案例：预置链接 → 转载源翻页 → 搜索引擎 → 主题过滤 → 校验 → 写扩展库
+    """探索并入库新案例：官方库 → 预置链接 → 转载源翻页 → 搜索引擎 → 主题过滤 → 校验 → 写扩展库
 
     返回本次【新入库】的案例列表（已存在扩展库的编号只累计来源数）。
     crawled 记录已抓过的页面，每日只抓新内容，持续扩容。
     """
     discovered: list[Case] = []
+    try:
+        # 官方案例库：权威结构化数据，优先采集（Token 失效自动跳过）
+        from .rmfyalk import harvest_rmfyalk
+        picked_kw = pick_daily_keywords(keywords, rmfyalk_keywords_per_day)
+        log.info("官方库本轮检索关键词（按日轮换 %d/%d）：%s",
+                 rmfyalk_keywords_per_day, len(keywords), picked_kw)
+        discovered += harvest_rmfyalk(
+            picked_kw, crawled,
+            pages_per_keyword=rmfyalk_pages_per_keyword,
+            title_filter=_list_title_relevant,
+        )
+    except Exception as e:
+        log.warning("官方案例库采集异常: %s", e)
     try:
         discovered += fetch_seed_links(crawled)
     except Exception as e:
@@ -477,8 +492,7 @@ def collect(
                 search_result_pages=search_result_pages,
             )
         except Exception as e:
-            log.warning("案例探索异常（不影响主流程）: %s", e)
-        # 扩展库案例按"最新发现优先"参与候选：截断时优先保留新入库案例，
+            log.warning("案例探索异常（不影响主流程）: %s", e)        # 扩展库案例按"最新发现优先"参与候选：截断时优先保留新入库案例，
         # 避免池子变大后新探索的案例永远排在尾部被饿死
         extra_dicts = list(extra.all_cases())
         extra_dicts.reverse()

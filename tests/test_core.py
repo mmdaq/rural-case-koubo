@@ -456,6 +456,83 @@ class TestCrawlStore(unittest.TestCase):
         cs2 = CrawlStore(path)
         self.assertTrue(cs2.is_crawled("https://a.example/x"))
 
+    def test_frontier_persistence(self):
+        path = os.path.join(tempfile.mkdtemp(), "crawled.json")
+        cs = CrawlStore(path)
+        self.assertEqual(cs.get_frontier("税递网·人民法院案例库栏目"), 0)
+        cs.set_frontier("税递网·人民法院案例库栏目", 60)
+        self.assertEqual(cs.get_frontier("税递网·人民法院案例库栏目"), 60)
+        cs2 = CrawlStore(path)
+        self.assertEqual(cs2.get_frontier("税递网·人民法院案例库栏目"), 60)
+
+
+class TestRmfyalkSource(unittest.TestCase):
+    """官方案例库检索源：mock 接口验证字段映射与降级行为"""
+
+    def _fake_post(self, search_payloads, content_payload):
+        calls = {"n": 0}
+
+        def fake_post(url, **kwargs):
+            resp = unittest.mock.MagicMock()
+            if "search" in url:
+                payload = search_payloads[calls["n"]] if calls["n"] < len(search_payloads) else {"code": 0, "data": {"totalCount": 0, "datas": []}}
+                calls["n"] += 1
+            else:
+                payload = content_payload
+            resp.json.return_value = payload
+            return resp
+
+        return fake_post
+
+    def test_no_token_skips(self):
+        from collector import rmfyalk
+        old = rmfyalk.os.getenv
+        rmfyalk.os.getenv = lambda k, d="": "" if k == "RMFYALK_TOKEN" else old(k, d)
+        try:
+            self.assertEqual(rmfyalk.harvest_rmfyalk(["土地承包"]), [])
+        finally:
+            rmfyalk.os.getenv = old
+
+    def test_harvest_maps_official_fields(self):
+        import unittest.mock as um
+        from collector import rmfyalk
+        search = {"code": 0, "data": {"totalCount": 1, "datas": [{
+            "cpws_al_id": "abc123",
+            "cpws_al_no": "2024-07-2-044-098",
+            "title": "张某诉某村委会侵害集体经济组织成员权益纠纷案",
+        }]}}
+        content = {"code": 0, "data": {
+            "cpws_al_jbaq": "法院审理查明，张某系某村集体经济组织成员，村委会未向其分配征地补偿款。",
+            "cpws_al_cpyz": "成员资格认定应综合户籍、土地承包及生活保障等因素。",
+            "cpws_al_cply": "本院认为，张某具有成员资格，判决支持其分配请求。",
+            "cpws_al_cpjg": "判决村委会于判决生效后十日内支付补偿款。",
+        }}
+        with um.patch.object(rmfyalk.requests, "post", side_effect=self._fake_post([search], content)):
+            cases = rmfyalk.harvest_rmfyalk(
+                ["集体经济组织成员权益"], token="t0k3n",
+                title_filter=lambda t: True, delay=0,
+            )
+        self.assertEqual(len(cases), 1)
+        c = cases[0]
+        self.assertEqual(c.rule_code, "2024-07-2-044-098")
+        self.assertIn("征地补偿款", c.facts)
+        self.assertIn("成员资格认定", c.gist)
+        self.assertIn("本院认为", c.reasoning)
+        self.assertTrue(c.official_link.startswith("https://rmfyalk.court.gov.cn/view/content.html?id=abc123"))
+        self.assertEqual(c.case_source, "人民法院案例库")
+
+    def test_title_filter_skips_irrelevant(self):
+        import unittest.mock as um
+        from collector import rmfyalk
+        search = {"code": 0, "data": {"totalCount": 1, "datas": [{
+            "cpws_al_id": "xyz789",
+            "cpws_al_no": "2024-01-2-111-001",
+            "title": "王某故意伤害案",
+        }]}}
+        with um.patch.object(rmfyalk.requests, "post", side_effect=self._fake_post([search], {"code": 0, "data": {}})):
+            cases = rmfyalk.harvest_rmfyalk(["故意伤害"], token="t", title_filter=lambda t: False, delay=0)
+        self.assertEqual(cases, [])
+
 
 class TestOfficialAnchor(unittest.TestCase):
     def test_official_link(self):
