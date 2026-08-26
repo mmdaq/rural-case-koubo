@@ -143,6 +143,21 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
     )
     log.info("采集到案例 %d 个", len(cases))
 
+    # 1.5 官库 Token 失效检测：失效时在当天邮件中附带刷新提醒
+    from collector.rmfyalk import LAST_UNAVAILABLE_REASON as _rmfyalk_err
+    token_notice = ""
+    if os.getenv("RMFYALK_TOKEN", "").strip() and "Token" in (_rmfyalk_err or ""):
+        token_notice = (
+            "\n---\n\n"
+            "## ⚠️ 人民法院案例库登录凭证（RMFYALK_TOKEN）已失效\n\n"
+            "- 官方案例库采集源本轮已自动跳过，其余来源不受影响\n"
+            "- **恢复方式**：浏览器登录 https://rmfyalk.court.gov.cn → F12 → 网络(Network) → "
+            "发起一次检索 → 复制请求头 `faxin-cpws-al-token` 的值\n"
+            "- 更新到仓库 Settings → Secrets and variables → Actions → `RMFYALK_TOKEN`\n"
+            "- 保存后下一轮运行将自动恢复官库采集并收割新案例入库\n"
+        )
+        log.warning("官库 Token 已失效，将在邮件中附提醒")
+
     # 2. 真伪核查（严格：不满足"官方可查锚点"或内容残缺的一律丢弃，防止杜撰/无法核实的案例流出）
     verify_cfg = cfg.get("verify", {})
     min_src = int(verify_cfg.get("min_independent_sources", 1))
@@ -236,6 +251,8 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
 
         # 发送通知邮件
         notification_md = render_notification(state.consecutive_no_new, today)
+        if token_notice:
+            notification_md += "\n" + token_notice
         notif_path = os.path.join(out_dir, f"通知_{today}.md") if dry_run else None
         if notif_path:
             with open(notif_path, "w", encoding="utf-8") as f:
@@ -312,7 +329,8 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
     if not dry_run:
         mail_cfg = cfg.get("mail", {})
         subject = f"{mail_cfg.get('subject_prefix', '')}{today} · 农村集体资产案例口播文案（{len(scripts)}篇）"
-        body = md_text if len(md_text) < 40000 else md_text[:40000]
+        body = md_text + (token_notice or "")
+        body = body if len(body) < 40000 else body[:40000]
         attach = md_path if gen_cfg.get("attach_file", True) else ""
         sent = send_email(mail_cfg, subject, body, attach_path=attach)
     else:

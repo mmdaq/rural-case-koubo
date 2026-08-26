@@ -39,6 +39,11 @@ class RmfyalkUnavailable(Exception):
     """官网服务不可用（Token 失效/接口异常/网络失败）"""
 
 
+# 最近一次不可用的原因（供 pipeline 判断是否需要在邮件中提醒刷新 Token）。
+# 空字符串 = 本轮官库采集正常或未触发。
+LAST_UNAVAILABLE_REASON = ""
+
+
 def get_token() -> str:
     return os.getenv("RMFYALK_TOKEN", "").strip()
 
@@ -65,8 +70,11 @@ def _search(keyword: str, token: str, page: int = 1, size: int = 20,
             "sort_field": "",
         },
     }
-    resp = requests.post(SEARCH_API, json=body, headers=_auth_headers(token), timeout=timeout)
-    data = resp.json()
+    try:
+        resp = requests.post(SEARCH_API, json=body, headers=_auth_headers(token), timeout=timeout)
+        data = resp.json()
+    except requests.RequestException as e:
+        raise RmfyalkUnavailable(f"检索接口网络异常: {e}") from e
     if data.get("code") == 401:
         raise RmfyalkUnavailable(f"案例库 Token 无效或已过期: {data.get('msg')}")
     if data.get("code") != 0:
@@ -79,11 +87,14 @@ def _content(cpws_al_id: str, token: str, timeout: int = 20) -> dict:
 
     与官网前端一致：POST {gid: <搜索返回的已编码id>}，不要二次编码
     """
-    resp = requests.post(
-        CONTENT_API, json={"gid": cpws_al_id},
-        headers=_auth_headers(token), timeout=timeout,
-    )
-    data = resp.json()
+    try:
+        resp = requests.post(
+            CONTENT_API, json={"gid": cpws_al_id},
+            headers=_auth_headers(token), timeout=timeout,
+        )
+        data = resp.json()
+    except requests.RequestException as e:
+        raise RmfyalkUnavailable(f"详情接口网络异常: {e}") from e
     if data.get("code") == 401:
         raise RmfyalkUnavailable(f"案例库 Token 无效或已过期: {data.get('msg')}")
     if data.get("code") != 0:
@@ -133,6 +144,8 @@ def harvest_rmfyalk(keywords: list[str], crawled=None, max_fetch: int = 60,
     if not token:
         log.info("未配置 RMFYALK_TOKEN，跳过官方案例库源")
         return []
+    global LAST_UNAVAILABLE_REASON
+    LAST_UNAVAILABLE_REASON = ""
     found: list[Case] = []
     fetched = 0
     seen_ids: set[str] = set()
@@ -197,6 +210,7 @@ def harvest_rmfyalk(keywords: list[str], crawled=None, max_fetch: int = 60,
                 time.sleep(delay)
             log.info("官方库关键词【%s】命中 %d 条（前 %d 页）", kw, total_items, pages_per_keyword)
     except RmfyalkUnavailable as e:
-        # Token 失效等：保留已收获部分，其余交给其他源
+        # Token 失效等：保留已收获部分，记录原因供 pipeline 提醒刷新
+        LAST_UNAVAILABLE_REASON = str(e)
         log.warning("官方案例库不可用，本源提前收工: %s", e)
     return found

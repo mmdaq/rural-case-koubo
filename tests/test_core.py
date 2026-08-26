@@ -508,6 +508,15 @@ class TestRmfyalkSource(unittest.TestCase):
         finally:
             rmfyalk.os.getenv = old
 
+    def test_expired_token_sets_reminder_flag(self):
+        """Token 失效时设置 LAST_UNAVAILABLE_REASON，供邮件提醒"""
+        import unittest.mock as um
+        from collector import rmfyalk
+        search = {"code": 401, "msg": "token expired"}
+        with um.patch.object(rmfyalk.requests, "post", side_effect=self._fake_post([search], {})):
+            cases = rmfyalk.harvest_rmfyalk(["土地承包"], token="bad-token", delay=0)
+        self.assertEqual(cases, [])
+        self.assertIn("Token 无效或已过期", rmfyalk.LAST_UNAVAILABLE_REASON)
     def test_harvest_maps_official_fields(self):
         import unittest.mock as um
         from collector import rmfyalk
