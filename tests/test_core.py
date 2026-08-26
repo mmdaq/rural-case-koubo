@@ -444,6 +444,21 @@ class TestRelaxFields(unittest.TestCase):
         self.assertFalse(strict["ok"])   # 默认口径仍要求 reasoning
         self.assertTrue(relaxed["ok"], relaxed["issues"])
 
+    def test_doc_no_format_ignored_with_official_link(self):
+        """官库来源：有官方链接时，非规范文书号不应一票否决"""
+        case = {
+            "rule_code": "2024-18-3-019-001",
+            "title": "某村小组诉某市人民政府土地征收补偿案",
+            "doc_no": "2024）赣行终105号",  # 官库 ajzh 偶见缺左括号
+            "facts": "某村小组承包的集体土地被征收，诉请市政府履行征收补偿职责。",
+            "gist": "裁判要旨：征收集体土地应当依法足额支付补偿费用。",
+            "reasoning": "本院认为，市政府未依法履行补偿职责。",
+            "official_link": "https://rmfyalk.court.gov.cn/view/content.html?id=abc",
+            "source_urls": ["https://rmfyalk.court.gov.cn/view/content.html?id=abc"],
+        }
+        v = verify_case(case, min_sources=0, require_official_anchor=True)
+        self.assertTrue(v["ok"], v["issues"])
+
 
 class TestCrawlStore(unittest.TestCase):
     def test_mark_and_persist(self):

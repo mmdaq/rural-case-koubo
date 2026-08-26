@@ -255,7 +255,9 @@ def verify_case(
     has_anchor, anchor_kind = official_anchor(case)
     if not code_ok and not (case.get("official_link") or "").strip():
         issues.append(f"入库编号格式非法: {case.get('rule_code')}")
-    if not check_doc_no(case.get("doc_no", "")):
+    # 已有官方可查锚点时，文书号格式不再作为否决项
+    # （官库来源的 ajzh 字段偶见缺左括号等非规范写法，如 "2024）赣行终105号"）
+    if not check_doc_no(case.get("doc_no", "")) and not has_anchor:
         issues.append(f"裁判文书号格式非法: {case.get('doc_no')}")
 
     # 有官方链接可查时，允许无入库编号（如最高院典型案例仅给官方链接）
