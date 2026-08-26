@@ -408,6 +408,43 @@ class TestScenarioClassifier(unittest.TestCase):
         self.assertNotEqual(classify_scenario(text), "资金侵占")
 
 
+class TestDiscoveryHelpers(unittest.TestCase):
+    """采集扩充：按日轮换选词 + 转载源标题预过滤"""
+
+    def test_pick_daily_keywords_stable_and_capped(self):
+        from collector.crawler import pick_daily_keywords
+        kws = [f"关键词{i}" for i in range(20)]
+        a = pick_daily_keywords(kws, 4)
+        b = pick_daily_keywords(kws, 4)
+        self.assertEqual(a, b)            # 同一天多次运行结果一致（幂等）
+        self.assertEqual(len(a), 4)
+        self.assertEqual(len(set(a)), 4)  # 无重复
+
+    def test_feed_title_prefilter(self):
+        from collector.crawler import _list_title_relevant
+        self.assertTrue(_list_title_relevant("张某诉某村委会征地补偿款分配纠纷案"))
+        self.assertTrue(_list_title_relevant("人民法院案例库_周某某土地承包经营权纠纷案"))
+        self.assertFalse(_list_title_relevant("王某故意伤害案"))
+        self.assertTrue(_list_title_relevant(""))  # 空标题放行，交给正文主题闸门
+
+
+class TestRelaxFields(unittest.TestCase):
+    """发现阶段放宽 reasoning：转载/搜索页常无该分节，不应因此误杀"""
+
+    def test_relax_admits_missing_reasoning(self):
+        case = {
+            "rule_code": "2024-07-2-044-099",
+            "title": "张某诉某村委会侵害集体经济组织成员权益纠纷案",
+            "facts": "法院审理认定张某具有集体经济组织成员资格，判决村委会支付土地补偿费50000元。",
+            "gist": "裁判要旨：成员资格认定应综合户籍、土地、生活来源。",
+            "source_urls": ["https://example-a.com/x", "https://example-b.com/y"],
+        }
+        strict = verify_case(case, min_sources=0, require_official_anchor=True)
+        relaxed = verify_case(case, min_sources=0, require_official_anchor=True, relax_fields=True)
+        self.assertFalse(strict["ok"])   # 默认口径仍要求 reasoning
+        self.assertTrue(relaxed["ok"], relaxed["issues"])
+
+
 class TestCrawlStore(unittest.TestCase):
     def test_mark_and_persist(self):
         path = os.path.join(tempfile.mkdtemp(), "crawled.json")

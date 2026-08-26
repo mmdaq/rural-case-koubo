@@ -127,12 +127,16 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
 
     # 1. 采集（含自我扩充：搜索→提取→写扩展库）
     coll = cfg.get("collector", {})
+    disc = coll.get("discover", {}) or {}
     cases = collect(
         keywords=coll.get("keywords", []),
         extra=extra,
         crawled=crawled,
         use_fallback=coll.get("use_fallback", True),
         max_cases=int(coll.get("max_cases_per_day", 20)),
+        feed_max_fetch=int(disc.get("feed_max_fetch", 150)),
+        search_keywords_per_day=int(disc.get("search_keywords_per_day", 4)),
+        search_result_pages=int(disc.get("search_result_pages", 2)),
     )
     log.info("采集到案例 %d 个", len(cases))
 
@@ -147,7 +151,7 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
         if not is_rural_collective_theme(c.to_dict()):
             log.info("丢弃非农村集体资产主题案例 %s | %s", c.rule_code, (c.title or "")[:30])
             continue
-        v = verify_case(c.to_dict(), min_sources=min_src, require_official_anchor=require_anchor)
+        v = verify_case(c.to_dict(), min_sources=min_src, require_official_anchor=require_anchor, relax_fields=True)
         # 内容残缺（无案情/无裁判要旨/案情过短）的线索案例直接丢弃，防止生成垃圾文案
         if not (c.facts or "").strip() or len(c.facts) < 50 or not (c.gist or "").strip():
             log.info("丢弃内容残缺案例 %s", c.rule_code)

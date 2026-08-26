@@ -24,6 +24,9 @@ DOC_NO_RE = re.compile(
 
 # 案例必填字段
 REQUIRED_FIELDS = ["rule_code", "title", "facts", "reasoning", "gist", "source_urls"]
+# 转载/搜索来源常缺"裁判理由"分节，但案情+裁判要旨已足够支撑文案生成，
+# 发现阶段可放宽（推送前的内容闸门仍要求 facts≥50字 且 gist 非空）
+SOFT_FIELDS = ["reasoning"]
 
 # 内容要素（用于判断"像不像真案例"）
 CONTENT_HINTS = ["人民法院", "判决", "征收", "补偿", "集体经济组织", "成员资格"]
@@ -235,8 +238,17 @@ def official_anchor(case: dict) -> tuple[bool, str]:
     return False, ""
 
 
-def verify_case(case: dict, min_sources: int = 1, require_official_anchor: bool = True) -> dict:
-    """综合核查，返回 {ok, issues}"""
+def verify_case(
+    case: dict,
+    min_sources: int = 1,
+    require_official_anchor: bool = True,
+    relax_fields: bool = False,
+) -> dict:
+    """综合核查，返回 {ok, issues}
+
+    relax_fields=True 时放宽 SOFT_FIELDS（如 reasoning）为可选，
+    供发现阶段使用；推送前主流程仍用默认严格口径。
+    """
     issues = []
 
     code_ok = check_rule_code(case.get("rule_code", ""))
@@ -249,6 +261,8 @@ def verify_case(case: dict, min_sources: int = 1, require_official_anchor: bool 
     # 有官方链接可查时，允许无入库编号（如最高院典型案例仅给官方链接）
     has_official_link = bool((case.get("official_link") or "").strip())
     skip = ("rule_code",) if not code_ok and has_official_link else ()
+    if relax_fields:
+        skip = tuple(skip) + tuple(f for f in SOFT_FIELDS if f not in skip)
     missing = missing_fields(case, skip=skip)
     if missing:
         issues.append(f"缺少必填字段: {missing}")

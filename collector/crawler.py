@@ -13,6 +13,7 @@
 import random
 import re
 import time
+from datetime import datetime
 from urllib.parse import urljoin
 
 from .extractor import extract_case, extract_cases_multi
@@ -42,6 +43,7 @@ TOPIC_HINTS = [
     "成员资格", "宅基地", "村规民约", "外嫁女", "村民小组", "村委会",
     "股权证", "承包地", "安置补助", "青苗", "入市", "集体资产",
     "责任田", "入赘", "收益分配", "经营权", "承包金", "成员权益",
+    "土地补偿费", "集体土地", "土地流转", "四荒", "村集体", "嫁出",
 ]
 
 
@@ -105,8 +107,6 @@ def fetch_court_gov(**kwargs) -> list[Case]:
 # 人工核实的案例库原文/专题页面（multi=True 表示一页含多个案例，如澎湃"一网一库"专题）
 SEED_LINKS = [
     {"url": "https://m.thepaper.cn/newsDetail_forward_32405836", "name": "澎湃·一网一库专题第61期", "multi": True},
-    {"url": "https://www.zhongliaolvshi.com/zhongliaoshuofa/3526.html", "name": "中辽律师·成员资格认定案例解析", "multi": True},
-    {"url": "https://www.zhongliaolvshi.com/zhongliaoshuofa/3528.html", "name": "中辽律师·成员资格认定案例解析", "multi": True},
     {"url": "http://jingsongls.com/jsyw/1226.html", "name": "京讼律师·户籍非唯一因素案例", "multi": False},
     {"url": "https://www.taxdy.cn/h-nd-293634.html", "name": "税递网案例库原文", "multi": False},
     {"url": "https://www.taxdy.cn/h-nd-294941.html", "name": "税递网案例库原文", "multi": False},
@@ -152,9 +152,11 @@ FEED_SOURCES = [
         "url": "https://www.taxdy.cn/h-nr--0_865_520.html",
         "link_pattern": "h-nd-",
         "page_param": "m31pageno",
-        "max_pages": 60,
-        # 该栏目全部为人民法院案例库内容，无需标题预过滤，扩大案例池
-        "prefilter": False,
+        # 栏目实测到约120页（每页30条）。深翻必须配合标题预过滤：
+        # 深页为案例库全类目（刑事/公司/环保混杂），预过滤可把每轮抓取
+        # 预算全部留给涉农详情页
+        "max_pages": 130,
+        "prefilter": True,
     },
     {
         "name": "安徽律师网·民事参考案例",
@@ -207,6 +209,7 @@ def fetch_feeds(crawled: CrawlStore | None = None, max_fetch: int = 150) -> list
         prefilter = bool(src.get("prefilter", True))
         try:
             detail_links: list[tuple[str, str]] = []
+            consecutive_failures = 0
             for page_no in range(1, max_pages + 1):
                 url = src["url"]
                 if page_param and page_no > 1:
@@ -214,7 +217,17 @@ def fetch_feeds(crawled: CrawlStore | None = None, max_fetch: int = 150) -> list
                     url = f"{url}{sep}{page_param}={page_no}"
                 list_html = _safe_get(url, timeout=15)
                 if not list_html:
+                    # 连续多个列表页失败（站点限流/宕机）→ 快速放弃该源，
+                    # 把预算留给其他源，不拖死整轮任务
+                    consecutive_failures += 1
+                    if consecutive_failures >= 3:
+                        log.warning(
+                            "转载源【%s】连续 %d 个列表页失败，跳过剩余页",
+                            src["name"], consecutive_failures,
+                        )
+                        break
                     continue
+                consecutive_failures = 0
                 detail_links.extend(_extract_detail_links(list_html, src.get("link_pattern"), base_url=src["url"]))
                 time.sleep(0.3)
             log.info("转载源【%s】翻页获取 %d 个详情链接", src["name"], len(detail_links))
@@ -247,33 +260,59 @@ def fetch_feeds(crawled: CrawlStore | None = None, max_fetch: int = 150) -> list
 
 # ---------------- 搜索引擎检索（辅助源） ----------------
 
-def _search_result_links(query: str, max_links: int = 6) -> list[str]:
-    """搜索引擎检索，返回结果页链接（过滤搜索引擎自身域名）"""
+def _search_result_links(query: str, max_links: int = 6, pages: int = 1) -> list[str]:
+    """搜索引擎检索（支持结果分页），返回结果页链接（过滤搜索引擎自身域名）
+
+    Bing 用 first 参数翻页（first=1, 11, 21...每页约10条）。
+    """
     import requests
     from bs4 import BeautifulSoup
-    html = _safe_get(SEARCH_ENGINES["bing"].format(q=requests.utils.quote(query)))
-    if not html:
-        return []
-    soup = BeautifulSoup(html, "html.parser")
-    links = []
-    for a in soup.select("li.b_algo h2 a, h2 a"):
-        href = (a.get("href") or "").strip()
-        if href.startswith("http") and "bing.com" not in href and "microsoft.com" not in href:
-            links.append(href)
+    links: list[str] = []
+    for page_no in range(1, max(pages, 1) + 1):
+        first = (page_no - 1) * 10 + 1
+        url = SEARCH_ENGINES["bing"].format(q=requests.utils.quote(query))
+        if page_no > 1:
+            url += f"&first={first}"
+        html = _safe_get(url, timeout=12)
+        if not html:
+            continue
+        soup = BeautifulSoup(html, "html.parser")
+        for a in soup.select("li.b_algo h2 a, h2 a"):
+            href = (a.get("href") or "").strip()
+            if href.startswith("http") and "bing.com" not in href and "microsoft.com" not in href:
+                links.append(href)
+        time.sleep(0.3)
     return list(dict.fromkeys(links))[:max_links]
+
+
+def pick_daily_keywords(keywords: list, n: int) -> list:
+    """按日轮换抽样关键词：以日期为种子，同一天结果稳定、不同天逐步覆盖全量"""
+    if not keywords:
+        return []
+    rnd = random.Random(datetime.now().strftime("%Y%m%d"))
+    return rnd.sample(keywords, min(len(keywords), max(n, 1)))
 
 
 def fetch_search_web(
     keywords: list,
     crawled: CrawlStore | None = None,
-    max_pages: int = 2,
-    per_page: int = 5,
+    keywords_per_day: int = 4,
+    result_pages: int = 2,
+    per_page: int = 6,
 ) -> list[Case]:
-    """搜索引擎检索→抓全文→提取案例（结果质量依赖网络环境）"""
+    """搜索引擎检索→抓全文→提取案例（结果质量依赖网络环境）
+
+    关键词按日轮换：保证同一天内多次运行一致、不同天数逐步覆盖全部关键词，
+    避免只盯着前几个词反复检索。
+    """
     found: list[Case] = []
     seen_urls: set[str] = set()
-    for kw in random.sample(keywords, min(len(keywords), max_pages)):
-        links = _search_result_links(kw, per_page)
+    picked_kws = pick_daily_keywords(keywords, keywords_per_day)
+    if not picked_kws:
+        return found
+    log.info("本轮检索关键词（按日轮换 %d/%d）：%s", len(picked_kws), len(keywords), picked_kws)
+    for kw in picked_kws:
+        links = _search_result_links(kw, per_page, pages=result_pages)
         for url in links:
             if url in seen_urls:
                 continue
@@ -283,10 +322,12 @@ def fetch_search_web(
             html = _safe_get(url, timeout=12)
             if not html:
                 continue
-            if crawled:
-                crawled.mark_crawled(url)
             case = extract_case(html, url, source_name="搜索引擎")
             if case:
+                # 仅在成功提取时记录已爬：搜索页常因排版差异首次解析失败，
+                # 保留重试机会（关键词每日轮换，页面会以新组合被重新检回）
+                if crawled:
+                    crawled.mark_crawled(url)
                 found.append(case)
             time.sleep(0.4)
     return found
@@ -299,6 +340,9 @@ def discover_new_cases(
     keywords: list,
     crawled: CrawlStore | None = None,
     max_new: int = 10,
+    feed_max_fetch: int = 150,
+    search_keywords_per_day: int = 4,
+    search_result_pages: int = 2,
 ) -> list[Case]:
     """探索并入库新案例：预置链接 → 转载源翻页 → 搜索引擎 → 主题过滤 → 校验 → 写扩展库
 
@@ -311,11 +355,16 @@ def discover_new_cases(
     except Exception as e:
         log.warning("预置链接采集异常: %s", e)
     try:
-        discovered += fetch_feeds(crawled)
+        discovered += fetch_feeds(crawled, max_fetch=feed_max_fetch)
     except Exception as e:
         log.warning("转载源采集异常: %s", e)
     try:
-        discovered += fetch_search_web(keywords, crawled)
+        discovered += fetch_search_web(
+            keywords,
+            crawled,
+            keywords_per_day=search_keywords_per_day,
+            result_pages=search_result_pages,
+        )
     except Exception as e:
         log.warning("搜索引擎采集异常: %s", e)
 
@@ -336,7 +385,8 @@ def discover_new_cases(
             log.info("非农村集体资产主题，丢弃 %s | %s", c.rule_code, (c.title or "")[:30])
             continue
         # 严格校验：必须满足"官方可查锚点"（官方链接 / 编号+文书号 / 多源交叉）
-        v = verify_case(c.to_dict(), min_sources=0, require_official_anchor=True)
+        # 发现阶段放宽 reasoning（转载页常无该分节），推送前主流程仍有内容闸门
+        v = verify_case(c.to_dict(), min_sources=0, require_official_anchor=True, relax_fields=True)
         if not v["ok"]:
             log.info("提取案例无可查锚点/未通过校验，不入库 %s: %s", c.rule_code, v["issues"])
             continue
@@ -360,6 +410,9 @@ def collect(
     crawled: CrawlStore | None = None,
     use_fallback: bool = True,
     max_cases: int = 20,
+    feed_max_fetch: int = 150,
+    search_keywords_per_day: int = 4,
+    search_result_pages: int = 2,
 ) -> list[Case]:
     """主采集：探索新案例 → 扩展库 → 种子，汇总去重返回
 
@@ -385,15 +438,25 @@ def collect(
     # 3. 自我扩充：探索新案例并写入扩展库
     if extra is not None:
         try:
-            discover_new_cases(extra, keywords, crawled)
+            discover_new_cases(
+                extra,
+                keywords,
+                crawled,
+                feed_max_fetch=feed_max_fetch,
+                search_keywords_per_day=search_keywords_per_day,
+                search_result_pages=search_result_pages,
+            )
         except Exception as e:
             log.warning("案例探索异常（不影响主流程）: %s", e)
-        # 扩展库全部案例参与候选（含历史累积）；严格主题过滤 + 官方可查锚点双闸门
-        for d in extra.all_cases():
+        # 扩展库案例按"最新发现优先"参与候选：截断时优先保留新入库案例，
+        # 避免池子变大后新探索的案例永远排在尾部被饿死
+        extra_dicts = list(extra.all_cases())
+        extra_dicts.reverse()
+        for d in extra_dicts:
             if not is_rural_collective_theme(d):
                 log.info("扩展库案例非农村集体资产主题，跳过: %s %s", d.get("rule_code"), (d.get("title") or "")[:30])
                 continue
-            v = verify_case(d, min_sources=0, require_official_anchor=True)
+            v = verify_case(d, min_sources=0, require_official_anchor=True, relax_fields=True)
             if not v["ok"]:
                 log.info("扩展库案例缺少可查锚点，跳过: %s %s", d.get("rule_code"), v["issues"])
                 continue
@@ -404,9 +467,7 @@ def collect(
         "候选案例池共 %d 个（扩展库 %d 个）",
         len(cases), extra.stats()["total"] if extra else 0,
     )
-    # 截断上限：防止池子过大时 _select_candidates 遍历过多
-    # 但不要截断太小：案例池 < 30 时全部返回，否则每日 5 篇很快循环完
-    if len(cases) > max(max_cases, 50):
-        # 按来源优先级截断：种子 > 官方源 > 扩展库（扩展库按插入顺序取）
-        return cases[:max(max_cases, 50)]
+    # 截断上限：仅作极端防护（遍历成本），阈值需远大于"日更5篇×数月消耗"
+    if len(cases) > max(max_cases, 500):
+        return cases[:max(max_cases, 500)]
     return cases
