@@ -196,41 +196,71 @@ def _list_title_relevant(title: str) -> bool:
 
 
 def fetch_feeds(crawled: CrawlStore | None = None, max_fetch: int = 150) -> list[Case]:
-    """抓转载源列表页（支持分页）→遍历全部链接做标题预过滤→详情页→提取案例
+    """抓转载源列表页 → 遍历链接做标题预过滤 → 详情页 → 提取案例
 
-    翻页收集大量链接，按源配置决定是否标题预过滤；max_fetch 控制每源抓取上限，
-    已抓过的详情页（crawled 记录）跳过，聚焦新内容。
+    翻页策略（防限流 + 增量推进）：
+    - 头部区（第 1~3 页）：网站新文章从列表头进入，每轮必扫；
+    - 深入区（frontier+1 页起，直到 max_pages）：从上次扫描边界继续，
+      边界随仓库持久化，跨天逐步推进，不浪费预算在已爬区；
+    - 连续多个纯旧链接的页面 → 视为已扫尽，提前收工；
+    - 连续网络失败 → 快速放弃该源（限流/宕机），预算让给其他源。
     """
     found: list[Case] = []
     seen_urls: set[str] = set()
     for src in FEED_SOURCES:
+        name = src["name"]
         max_pages = int(src.get("max_pages", 1))
         page_param = src.get("page_param")
         prefilter = bool(src.get("prefilter", True))
+        frontier = crawled.get_frontier(name) if crawled else 0
+
+        page_seq: list[int] = []
+        for p in list(range(1, min(4, max_pages) + 1)) + \
+                 list(range(max(frontier + 1, 4), max_pages + 1)):
+            if p not in page_seq:
+                page_seq.append(p)
+
         try:
             detail_links: list[tuple[str, str]] = []
             consecutive_failures = 0
-            for page_no in range(1, max_pages + 1):
+            barren_pages = 0
+            deepest_ok = frontier
+            for page_no in page_seq:
                 url = src["url"]
                 if page_param and page_no > 1:
                     sep = "&" if "?" in url else "?"
                     url = f"{url}{sep}{page_param}={page_no}"
                 list_html = _safe_get(url, timeout=15)
                 if not list_html:
-                    # 连续多个列表页失败（站点限流/宕机）→ 快速放弃该源，
-                    # 把预算留给其他源，不拖死整轮任务
+                    # 连续失败（站点限流/宕机）→ 快速放弃该源，进度已保存
                     consecutive_failures += 1
                     if consecutive_failures >= 3:
                         log.warning(
-                            "转载源【%s】连续 %d 个列表页失败，跳过剩余页",
-                            src["name"], consecutive_failures,
+                            "转载源【%s】连续 %d 个列表页失败，本轮跳过（已扫到第 %d 页）",
+                            name, consecutive_failures, deepest_ok,
                         )
                         break
                     continue
                 consecutive_failures = 0
-                detail_links.extend(_extract_detail_links(list_html, src.get("link_pattern"), base_url=src["url"]))
-                time.sleep(0.3)
-            log.info("转载源【%s】翻页获取 %d 个详情链接", src["name"], len(detail_links))
+                deepest_ok = max(deepest_ok, page_no)
+                links = _extract_detail_links(list_html, src.get("link_pattern"), base_url=src["url"])
+                fresh_cnt = sum(
+                    1 for u, _ in links
+                    if u not in seen_urls and not (crawled and crawled.is_crawled(u))
+                )
+                if fresh_cnt == 0 and page_no > 3:
+                    barren_pages += 1
+                    if barren_pages >= 5:
+                        log.info("转载源【%s】连续 %d 页无新链接，判定已扫尽", name, barren_pages)
+                        break
+                else:
+                    barren_pages = 0
+                detail_links.extend(links)
+                time.sleep(0.6)
+            if crawled and deepest_ok > frontier:
+                crawled.set_frontier(name, deepest_ok)
+            log.info("转载源【%s】翻页获取 %d 个详情链接（扫描范围至第 %d 页）",
+                     name, len(detail_links), deepest_ok)
             fetched = 0
             for url, title in detail_links:
                 if url in seen_urls:

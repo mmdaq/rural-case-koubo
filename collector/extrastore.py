@@ -137,11 +137,16 @@ class CrawlStore:
 
     用途：每次运行只抓取"没抓过"的新页面，避免反复抓同一批页面，
     让每日自动采集聚焦新内容，案例池持续扩容。
+
+    另记录每个转载源的翻页边界（feed_frontiers）：列表页从第 1 页起
+    顺序翻会反复经过已爬区，浪费请求预算还容易触发站点限流；记录
+    "已扫到的最深处"，下一轮直接从边界继续，进度跨天持久推进。
     """
 
     def __init__(self, path: str):
         self.path = path
         self.urls: set[str] = set()
+        self.frontiers: dict[str, int] = {}
         self._load()
 
     def _load(self):
@@ -150,14 +155,19 @@ class CrawlStore:
                 with open(self.path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 self.urls = set(data.get("urls", []))
-            except (json.JSONDecodeError, OSError) as e:
+                self.frontiers = {k: int(v) for k, v in (data.get("feed_frontiers") or {}).items()}
+            except (json.JSONDecodeError, OSError, ValueError) as e:
                 log.warning("已抓URL记录读取失败，重建: %s", e)
                 self.urls = set()
+                self.frontiers = {}
 
     def _save(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         with open(self.path, "w", encoding="utf-8") as f:
-            json.dump({"urls": sorted(self.urls)}, f, ensure_ascii=False, indent=2)
+            json.dump(
+                {"urls": sorted(self.urls), "feed_frontiers": self.frontiers},
+                f, ensure_ascii=False, indent=2,
+            )
 
     def is_crawled(self, url: str) -> bool:
         return url in self.urls
@@ -166,6 +176,16 @@ class CrawlStore:
         if url not in self.urls:
             self.urls.add(url)
             self._save()
+
+    def get_frontier(self, source_name: str) -> int:
+        """该源已扫描到的最深页码（0 表示从未扫过）"""
+        return self.frontiers.get(source_name, 0)
+
+    def set_frontier(self, source_name: str, page: int):
+        if page > self.frontiers.get(source_name, 0):
+            self.frontiers[source_name] = int(page)
+            self._save()
+            log.info("转载源【%s】翻页边界推进到第 %d 页", source_name, page)
 
     def stats(self) -> dict:
         return {"total": len(self.urls)}
