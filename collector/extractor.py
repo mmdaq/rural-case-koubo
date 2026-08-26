@@ -25,8 +25,11 @@ _SECTION_ENDS = {
     "gist": ["关联索引", "案例编写", "入库日期", "生效裁判"],
 }
 
-# 场景自动打标关键词（顺序即优先级：更具体的主题放前面）
+# 场景自动打标关键词（顺序即同分时的优先级：更具体的主题放前面）
+# 匹配采用评分制：命中关键词数最多的场景胜出，避免"青苗补偿"这类
+# 泛词把村干部职务侵占案误标成"承包方消亡继承"（曾致文案文不对题）。
 SCENARIO_RULES = [
+    ("资金侵占", ["职务侵占", "挪用资金", "挪用公款", "贪污", "侵占集体", "挪用集体", "白条入账"]),
     ("外嫁女·股权证", ["股权证", "产权制度改革"]),
     ("外嫁女·分红", ["分红", "婚出姑娘", "外嫁"]),
     ("离婚妇女", ["离婚", "离异", "解除婚姻"]),
@@ -38,7 +41,6 @@ SCENARIO_RULES = [
     ("征地补偿", ["征地补偿", "征收补偿", "安置补助", "土地征收"]),
     ("承包地纠纷", ["土地承包经营权合同", "承包经营权合同纠纷", "承包地", "土地承包"]),
     ("村务公开", ["村务公开", "知情权", "查账", "公开集体资产"]),
-    ("资金侵占", ["侵占集体", "挪用集体", "贪污", "白条入账"]),
     ("问题合同", ["超长期", "超低价", "民主议定程序", "补充协议书", "越权签订"]),
     ("集体资产租赁", ["租金", "厂房", "商铺", "租赁合同", "转租"]),
 ]
@@ -92,10 +94,30 @@ def _extract_title(text: str, html_title: str = "", code_pos: int = -1) -> str:
 
 
 def _extract_scenario(text: str) -> str:
-    for scenario, kws in SCENARIO_RULES:
-        if any(k in text for k in kws):
-            return scenario
-    return ""
+    return classify_scenario(text)
+
+
+def classify_scenario(text: str) -> str:
+    """加权评分场景分类。
+
+    - 权重按规则序递减：越靠前（越具体）的主题权重越高；
+    - 单场景命中数按 2 个封顶：防止"征地补偿"这类泛词靠数量碾压精准主题；
+    - 加权分 <3 视为证据不足，返回空串（宁缺毋滥，不强行贴错标签）。
+    """
+    text = text or ""
+    n = len(SCENARIO_RULES)
+    best_name, best_key = "", (-1, 0)
+    for idx, (name, kws) in enumerate(SCENARIO_RULES):
+        hits = sum(1 for k in kws if k in text)
+        if not hits:
+            continue
+        score = min(hits, 2) * (n - idx)
+        if score < 3:
+            continue
+        key = (score, -idx)  # 分数优先；同分时 idx 越小（越靠前的规则）胜出
+        if key > best_key:
+            best_name, best_key = name, key
+    return best_name
 
 
 def _extract_province(text: str, court: str) -> str:

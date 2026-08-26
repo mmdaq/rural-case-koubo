@@ -53,6 +53,8 @@ jobs:
           git config user.email "385096659@qq.com"
           git pull --rebase origin main --autostash || echo "跳过 pull（首次运行）"
           git add -f data/seen_cases.json data/extra_cases.json data/crawled_urls.json
+          # append-only 推送历史：防止去重库被误覆盖后重复推送，必须一并入库
+          [ -f data/push_history.jsonl ] && git add -f data/push_history.jsonl
           git commit -m "chore: 更新每日运行数据 $(date +%F)" || echo "本次无数据变更"
           git push
 

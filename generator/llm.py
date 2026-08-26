@@ -161,9 +161,24 @@ def generate_with_llm(case: Case, cfg: dict) -> dict | None:
     return None
 
 
-def generate_script(case: Case, cfg: dict) -> dict:
-    """生成单篇文案：优先 LLM，失败降级模板"""
+def generate_script(
+    case: Case,
+    cfg: dict,
+    used_titles: set | None = None,
+    used_ctas: set | None = None,
+    used_openers: set | None = None,
+) -> dict:
+    """生成单篇文案：优先 LLM，失败降级模板。
+
+    used_* 为同批次已使用的标题/CTA/开场集合，模板兜底时据此避免
+    同一批日报内出现重复的标题、开场与互动话术。
+    """
     script = generate_with_llm(case, cfg)
     if script:
         return script
-    return template.generate_script(case)
+    return template.generate_script(
+        case,
+        used_titles=used_titles,
+        used_ctas=used_ctas,
+        used_openers=used_openers,
+    )

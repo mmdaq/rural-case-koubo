@@ -43,15 +43,36 @@ OPENERS = {
 }
 DEFAULT_OPENER = "人民法院案例库收录了一起农村集体资产的真实案例。"
 
-# ---------------- 痛点开场钩子（按痛点定向切入） ----------------
+# ---------------- 痛点开场钩子（按痛点定向切入；每痛点多个变体，批内避让不重样） ----------------
 PAIN_HOOKS = {
-    "信息不对称": "村集体的家底你知道多少？征地款、分红、租金进了谁的口袋，很多村民根本看不见。",
-    "民主决策虚置": "村里的钱怎么分，有些人连会都没开过、票都没投过，就被一纸方案定了。",
-    "问题合同泛滥": "一亩地一年几块钱，一签就是几十年——这种合同你村有吗？",
-    "证据毁灭取证难": "十几年的老账，票据、合同、会议记录全都不在，这钱还怎么算？",
-    "群体性矛盾复杂": "村里分钱，有人拿得多、有人一分没有，凭啥？",
-    "报复与压制": "告村里怕被穿小鞋，赢了官司怕输了日子——可该你的钱，不能就这么算了。",
-    "执行落地难": "判决赢了，钱却一直执行不回来，这种情况你见过吗？",
+    "信息不对称": [
+        "村集体的家底你知道多少？征地款、分红、租金进了谁的口袋，很多村民根本看不见。",
+        "村里的账本常年锁在柜子里，钱从哪来、到哪去，村民说了不算也看不着。",
+    ],
+    "民主决策虚置": [
+        "村里的钱怎么分，有些人连会都没开过、票都没投过，就被一纸方案定了。",
+        "一分钱没开会讨论过，几个签字就把全体村民的收益定了——这种事你村有吗？",
+    ],
+    "问题合同泛滥": [
+        "一亩地一年几块钱，一签就是几十年——这种合同你村有吗？",
+        "三十年前签的合同，价格低得离谱还在执行，集体的家底就这么被贱卖。",
+    ],
+    "证据毁灭取证难": [
+        "十几年的老账，票据、合同、会议记录全都不在，这钱还怎么算？",
+        "想维权才发现，台账缺页、白条入账、凭证早烧了——法院怎么看？",
+    ],
+    "群体性矛盾复杂": [
+        "村里分钱，有人拿得多、有人一分没有，凭啥？",
+        "同一个村长大的，分钱的时候却分成三六九等，谁规定的？",
+    ],
+    "报复与压制": [
+        "告村里怕被穿小鞋，赢了官司怕输了日子——可该你的钱，不能就这么算了。",
+        "多少人不敢吭声，就怕以后办事被卡——法律给撑腰的底气在这。",
+    ],
+    "执行落地难": [
+        "判决赢了，钱却一直执行不回来，这种情况你见过吗？",
+        "官司打赢只是第一步，判决书上的数字怎么落进口袋？",
+    ],
 }
 
 # ---------------- 案情连接句 ----------------
@@ -89,83 +110,131 @@ def _shorten(text: str, limit: int = 90) -> str:
     return t.rstrip("。；;：:")
 
 
-def generate_script(case: Case, style_no: int = 0) -> dict:
-    """用模板生成一篇口播文案（返回 {rule_code, title, body, cta}）"""
-    rnd = random.Random(hash((case.rule_code, style_no)) & 0xFFFF)
+def generate_script(
+    case: Case,
+    style_no: int = 0,
+    used_titles: set | None = None,
+    used_ctas: set | None = None,
+    used_openers: set | None = None,
+) -> dict:
+    """用模板生成一篇口播文案（返回 {rule_code, title, body, cta}）。
+
+    used_titles / used_ctas / used_openers：同批次已用过的文案要素。
+    同一场景的多个案例极易撞标题/开场/CTA（这正是"日报明显重复"的来源之一），
+    这里通过换随机种子多次尝试，优先挑出批内不重复的组合。
+    """
+    used_titles = used_titles if used_titles is not None else set()
+    used_ctas = used_ctas if used_ctas is not None else set()
+    used_openers = used_openers if used_openers is not None else set()
+
     scenario = case.scenario or "default"
-    opener = rnd.choice(OPENERS.get(scenario, [DEFAULT_OPENER])).format(
-        court=case.court or "法院"
-    )
-    pain_hook = ""
-    for p in (case.pain_points or []):
-        hook = PAIN_HOOKS.get(p)
-        if hook:
-            pain_hook = hook
+    base_seed = hash((case.rule_code, style_no)) & 0xFFFF
+
+    best: dict | None = None
+    best_score = -1
+    for attempt in range(8):
+        rnd = random.Random((base_seed + attempt * 97) & 0xFFFF)
+
+        opener_core = rnd.choice(OPENERS.get(scenario, [DEFAULT_OPENER])).format(
+            court=case.court or "法院"
+        )
+        hook_variants = []
+        for p in (case.pain_points or []):
+            hook_variants.extend(PAIN_HOOKS.get(p, []))
+        pain_hook = ""
+        if hook_variants:
+            unused = [h for h in dict.fromkeys(hook_variants) if h not in used_openers]
+            pain_hook = rnd.choice(unused or hook_variants)
+        opener = f"{pain_hook}{opener_core}" if pain_hook else opener_core
+
+        fact_link = rnd.choice(FACT_LINKS)
+        facts = (case.facts or "").strip().replace("\n", "")
+        # 判决结果必须来自案例记录（result 字段），严禁按涉及金额自行推断
+        if (case.result or "").strip():
+            judge = case.result.strip().rstrip("。；;")
+        else:
+            judge = "法院依法作出裁判，该给的钱，一分不能少"
+        judgment = rnd.choice(JUDGMENT_TMPLS).format(judge=judge)
+        gist_short = _shorten(case.gist)
+        legal = rnd.choice(LEGAL_GISTS).format(gist_short=gist_short)
+        upgrade = rnd.choice(GIST_UPGRADE)
+        cta = rnd.choice(SCENARIO_CTAS.get(scenario, DEFAULT_CTAS))
+
+        title_pool = TITLE_HOOKS.get(
+            scenario,
+            [f"人民法院案例库真实案例：{_shorten(case.gist, 18)}"],
+        )
+        title = rnd.choice(title_pool)
+        # 标题池被同批次用尽时，退化为案例专属标题（取裁判要旨片段，随尝试加长，
+        # 保证不同案例批内不重样；仅在同场景案例极多时触发）
+        if title in used_titles:
+            gist_title = f"人民法院案例库真实案例：{_shorten(case.gist, 12 + attempt * 6)}"
+            if gist_title not in used_titles:
+                title = gist_title
+
+        body = (
+            f"{opener}{fact_link}{facts}"
+            f"{judgment}{legal}{upgrade}"
+        )
+        candidate = {
+            "rule_code": case.rule_code,
+            "title": title,
+            "body": body,
+            "cta": cta,
+        }
+        # 批内不重复得分：标题、开场、CTA 全新 = 3 分，全命中即采用
+        score = (
+            (title not in used_titles)
+            + (opener not in used_openers)
+            + (cta not in used_ctas)
+        )
+        if score == 3:
+            best = candidate
+            best_score = score
             break
-    if pain_hook:
-        opener = f"{pain_hook}{opener}"
-    fact_link = rnd.choice(FACT_LINKS)
-    facts = (case.facts or "").strip().replace("\n", "")
-    # 判决结果必须来自案例记录（result 字段），严禁按涉及金额自行推断
-    if (case.result or "").strip():
-        judge = case.result.strip().rstrip("。；;")
-    else:
-        judge = "法院依法作出裁判，该给的钱，一分不能少"
-    judgment = rnd.choice(JUDGMENT_TMPLS).format(judge=judge)
-    gist_short = _shorten(case.gist)
-    legal = rnd.choice(LEGAL_GISTS).format(gist_short=gist_short)
-    upgrade = rnd.choice(GIST_UPGRADE)
-    cta = rnd.choice(SCENARIO_CTAS.get(scenario, DEFAULT_CTAS))
+        if score > best_score:
+            best, best_score = candidate, score
 
-    title_hook = {
-        "离婚妇女": [
-            "离婚了，村里的钱就没你份？法院：不行！",
-            "离了婚，村里就把她当外人？法院：身份不变，钱照分！",
-        ],
-        "外嫁女": [
-            "嫁出去的姑娘，村里的分红没了？法院：得补！",
-            "户口没迁走，分红凭什么没你？法院：一分不能少！",
-        ],
-        "外嫁女·股权证": [
-            "一张股权证就想抹掉她的资格？法院：不认！",
-            "没股权证就不是村里人？法院：看的是户口和土地！",
-        ],
-        "承包方消亡继承": [
-            "老人去世，征地款就没了？法院：该给的还得给！",
-            "人走了，承包地的钱还能要回来吗？法院：能！",
-        ],
-        "分配方案": [
-            "村里分钱只按地分？法院：方案撤销！",
-            "没地的人就该一分不得？法院：集体收益人人有份！",
-        ],
-        "养女资格": [
-            "不是亲生就不给分钱？法院：她在村里生活就是村民！",
-            "户口在、人在住，凭什么少分？法院：资格不看出生！",
-        ],
-        "户籍迁出": [
-            "迁走户口就不是村里人？法院：资格不看户口本！",
-            "为娃上学迁户口，回来就不认了？法院：综合认定，不能一刀切！",
-        ],
-        "外嫁女·分红": [
-            "嫁出去的姑娘，分红就没你份？法院：得补上！",
-            "户口没迁走，分红凭什么没你？法院：一分不能少！",
-        ],
-    }.get(scenario, [f"人民法院案例库真实案例：{_shorten(case.gist, 18)}"])
+    used_titles.add(best["title"])
+    used_ctas.add(best["cta"])
+    return best
 
-    # 用案例编号做种子，让同一场景的不同案例标题可复现但不重复
-    seed_no = int(case.rule_code.replace("-", "")[-3:]) if case.rule_code else 0
-    title = title_hook[seed_no % len(title_hook)]
 
-    body = (
-        f"{opener}{fact_link}{facts}"
-        f"{judgment}{legal}{upgrade}"
-    )
-    return {
-        "rule_code": case.rule_code,
-        "title": title,
-        "body": body,
-        "cta": cta,
-    }
+TITLE_HOOKS = {
+    "离婚妇女": [
+        "离婚了，村里的钱就没你份？法院：不行！",
+        "离了婚，村里就把她当外人？法院：身份不变，钱照分！",
+    ],
+    "外嫁女": [
+        "嫁出去的姑娘，村里的分红没了？法院：得补！",
+        "户口没迁走，分红凭什么没你？法院：一分不能少！",
+    ],
+    "外嫁女·股权证": [
+        "一张股权证就想抹掉她的资格？法院：不认！",
+        "没股权证就不是村里人？法院：看的是户口和土地！",
+    ],
+    "承包方消亡继承": [
+        "老人去世，征地款就没了？法院：该给的还得给！",
+        "人走了，承包地的钱还能要回来吗？法院：能！",
+        "老人走后这笔征地款到底归谁？法院判了！",
+    ],
+    "分配方案": [
+        "村里分钱只按地分？法院：方案撤销！",
+        "没地的人就该一分不得？法院：集体收益人人有份！",
+    ],
+    "养女资格": [
+        "不是亲生就不给分钱？法院：她在村里生活就是村民！",
+        "户口在、人在住，凭什么少分？法院：资格不看出生！",
+    ],
+    "户籍迁出": [
+        "迁走户口就不是村里人？法院：资格不看户口本！",
+        "为娃上学迁户口，回来就不认了？法院：综合认定，不能一刀切！",
+    ],
+    "外嫁女·分红": [
+        "嫁出去的姑娘，分红就没你份？法院：得补上！",
+        "户口没迁走，分红凭什么没你？法院：一分不能少！",
+    ],
+}
 
 
 def format_script(script: dict) -> str:

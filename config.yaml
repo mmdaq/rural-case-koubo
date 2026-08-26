@@ -91,6 +91,9 @@ verify:
 storage:
   # 已推送案例去重库
   seen_file: "data/seen_cases.json"
+  # append-only 推送历史（每次推送追加一行，从不删改）
+  # 即使 seen_cases.json 被误覆盖丢失条目，也会从这里自动恢复，防重复推送
+  history_file: "data/push_history.jsonl"
   # 自动探索发现的新案例扩展库（每日累积）
   extra_file: "data/extra_cases.json"
   # 已抓取 URL 记录（每日只抓新页面，持续扩容）

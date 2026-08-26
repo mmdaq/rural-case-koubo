@@ -25,6 +25,43 @@ from utils.validator import verify_case, is_rural_collective_theme
 log = get_logger("pipeline")
 
 
+def _norm_title(title: str) -> str:
+    """标题归一化：去标点空格（与 dedup/extrastore 口径一致）"""
+    import re
+    return re.sub(r"[\s\u3000，。、（）()：:；;！？!?\"'“”‘’—-]", "", title or "")
+
+
+def _collapse_same_story(cases: list) -> tuple[list, dict]:
+    """同一案件以不同入库编号出现时，只保留一个代表编号。
+
+    返回 (去重后列表, {代表编号: [别名编号...])}。推送时会把别名编号一并
+    标记为已推送，防止"同案不同号"换个马甲重复推送。
+    """
+    kept: list = []
+    alias_map: dict[str, list] = {}
+    seen_titles: dict[str, str] = {}
+    dropped = 0
+    for d in cases:
+        code = d.get("rule_code", "")
+        nt = _norm_title(d.get("title", ""))
+        if not code or not nt:
+            kept.append(d)
+            continue
+        primary = seen_titles.get(nt)
+        if primary is None:
+            seen_titles[nt] = code
+            kept.append(d)
+        elif primary == code:
+            pass  # 同编号重复条目（如种子库与扩展库各存一份），直接丢弃
+        else:
+            alias_map.setdefault(primary, []).append(code)
+            dropped += 1
+            log.info("同案不同编号折叠：%s → %s | %s", code, primary, d.get("title", "")[:30])
+    if dropped:
+        log.info("同案折叠共 %d 条", dropped)
+    return kept, alias_map
+
+
 def _select_candidates(
     cases: list,
     seen: SeenStore,
@@ -81,7 +118,10 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
     cfg = cfg or _load_config()
     base = os.path.dirname(os.path.abspath(__file__))
     storage = cfg.get("storage", {})
-    seen = SeenStore(os.path.join(base, storage.get("seen_file", "data/seen_cases.json")))
+    seen = SeenStore(
+        os.path.join(base, storage.get("seen_file", "data/seen_cases.json")),
+        history_path=os.path.join(base, storage.get("history_file", "data/push_history.jsonl")),
+    )
     extra = ExtraStore(os.path.join(base, storage.get("extra_file", "data/extra_cases.json")))
     crawled = CrawlStore(os.path.join(base, storage.get("crawled_file", "data/crawled_urls.json")))
 
@@ -157,6 +197,7 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
     os.makedirs(out_dir, exist_ok=True)
     today = datetime.now().strftime("%Y-%m-%d")
     all_dicts = [c.to_dict() for c in valid]
+    all_dicts, alias_map = _collapse_same_story(all_dicts)
     candidates = _select_candidates(all_dicts, seen, count, cooldown_days, min_gap_days)
 
     # ── 无新案例：通知 / 停止逻辑 ──
@@ -217,13 +258,26 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
         log.warning("候选案例不足 %d 篇（案例池 %d 个），本轮仅推送 %d 篇",
                     count, len(all_dicts), len(candidates))
 
-    # 4. 生成文案（每案例 1 篇）
+    # 4. 生成文案（每案例 1 篇；批内标题/开场/CTA 互相避让，防止同一天重复话术）
     scripts = []
+    used_titles: set = set()
+    used_ctas: set = set()
+    used_openers: set = set()
     for d in candidates[:count]:
         enriched = enrich_case(d)
         case = Case.from_dict(enriched)
-        s = generate_script(case, cfg.get("llm", {}))
+        s = generate_script(
+            case,
+            cfg.get("llm", {}),
+            used_titles=used_titles,
+            used_ctas=used_ctas,
+            used_openers=used_openers,
+        )
         s["case"] = enriched
+        if s.get("title"):
+            used_titles.add(s["title"])
+        if s.get("cta"):
+            used_ctas.add(s["cta"])
         scripts.append(s)
 
     if not scripts:
@@ -237,9 +291,14 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
         f.write(md_text)
     log.info("文案已写入 %s", md_path)
 
-    # 6. 标记已推送（落盘成功即标记，防重）
+    # 6. 标记已推送（落盘成功即标记，防重；别名编号一并标记，防"同案不同号"复推）
     for s in scripts:
-        seen.mark_seen(s["case"].get("rule_code", ""), s["case"].get("title", ""))
+        c = s["case"]
+        code = c.get("rule_code", "")
+        seen.mark_seen(code, c.get("title", ""))
+        for alias in alias_map.get(code, []):
+            log.info("别名编号连带标记：%s（同案 %s）", alias, code)
+            seen.mark_seen(alias, c.get("title", ""))
 
     # 7. 发送邮件
     sent = False

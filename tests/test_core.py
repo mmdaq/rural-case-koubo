@@ -1,4 +1,5 @@
 """单元测试：校验与去重"""
+import json
 import os
 import sys
 import tempfile
@@ -240,13 +241,20 @@ class TestSelection(unittest.TestCase):
         self.assertEqual(sorted(codes), sorted("FGHIJ"))
 
     def test_rotation_oldest_first_after_cooldown(self):
-        """冷却期外的案例按最久未推送优先轮换，最近推送的兜底"""
+        """冷却期外/内的案例一律不得再次选入：只允许从未推送过的案例"""
         store = self._store_with_pushed({"A": 10, "B": 10, "C": 8, "D": 8, "E": 1, "F": 1})
         cases = [{"rule_code": c, "title": f"案{c}"} for c in "ABCDEF"]
         picked = _select_candidates(cases, store, 5, cooldown_days=7, min_gap_days=1)
+        # 案例池中所有案例都推送过 → 宁可空手而归（由通知机制兜底），也不复推
+        self.assertEqual(picked, [])
+
+    def test_never_reselect_pushed_even_if_pool_short(self):
+        """池子不足时也不得用已推送案例凑数"""
+        store = self._store_with_pushed({c: 30 for c in "ABC"})
+        cases = [{"rule_code": c, "title": f"案{c}"} for c in "ABCDE"]
+        picked = _select_candidates(cases, store, 5, cooldown_days=7, min_gap_days=1)
         codes = [d["rule_code"] for d in picked]
-        self.assertEqual(codes[:4], ["A", "B", "C", "D"])
-        self.assertEqual(len(codes), 5)
+        self.assertEqual(sorted(codes), ["D", "E"])
 
     def test_no_repeat_same_code_different_title(self):
         """同入库编号即使标题不同也算同一案例；有替代案例时不重复选它"""
@@ -258,6 +266,146 @@ class TestSelection(unittest.TestCase):
         codes = [d["rule_code"] for d in picked]
         self.assertNotIn("2024-07-2-044-002", codes)
         self.assertEqual(len(codes), 5)
+
+
+class TestSeenHistory(unittest.TestCase):
+    """append-only 推送历史：seen_cases.json 丢条目时自动恢复，防重复推送"""
+
+    def test_history_recovers_lost_entries(self):
+        tmpdir = tempfile.mkdtemp()
+        seen_path = os.path.join(tmpdir, "seen.json")
+        hist_path = os.path.join(tmpdir, "push_history.jsonl")
+
+        s1 = SeenStore(seen_path, history_path=hist_path)
+        s1.mark_seen("2024-07-2-044-004", "蔡某珠案")
+        s1.mark_seen("2025-12-3-021-001", "某案")
+
+        # 模拟事故：seen_cases.json 被旧版覆盖丢失全部条目
+        with open(seen_path, "w", encoding="utf-8") as f:
+            json.dump({"cases": {}}, f)
+
+        s2 = SeenStore(seen_path, history_path=hist_path)
+        self.assertTrue(s2.is_seen("2024-07-2-044-004"))
+        self.assertTrue(s2.is_seen("2025-12-3-021-001"))
+        self.assertIsNotNone(s2.last_pushed_at("2024-07-2-044-004"))
+
+    def test_history_backfilled_from_existing_store(self):
+        """已有去重库但无历史文件时，首次加载自动播种历史"""
+        tmpdir = tempfile.mkdtemp()
+        seen_path = os.path.join(tmpdir, "seen.json")
+        hist_path = os.path.join(tmpdir, "push_history.jsonl")
+
+        s1 = SeenStore(seen_path)  # 不带历史路径
+        s1.mark_seen("2023-16-2-044-001", "马某某案")
+
+        s2 = SeenStore(seen_path, history_path=hist_path)  # 首次带历史路径 → 播种
+        self.assertTrue(os.path.exists(hist_path))
+        with open(hist_path, "r", encoding="utf-8") as f:
+            lines = [json.loads(x) for x in f.read().splitlines() if x.strip()]
+        self.assertIn("2023-16-2-044-001", {x["rule_code"] for x in lines})
+
+    def test_history_tolerates_corrupt_lines(self):
+        tmpdir = tempfile.mkdtemp()
+        seen_path = os.path.join(tmpdir, "seen.json")
+        hist_path = os.path.join(tmpdir, "push_history.jsonl")
+        with open(hist_path, "w", encoding="utf-8") as f:
+            f.write('{"rule_code": "A-001", "title_hash": "", "pushed_at": "2026-08-01T08:00:00"}\n')
+            f.write('{"rule_code": "B-002", "pushed_at": "2026-08-02T08:00:00"\n')  # 半行
+            f.write('not json at all\n')
+
+        s = SeenStore(seen_path, history_path=hist_path)
+        self.assertTrue(s.is_seen("A-001"))
+        self.assertFalse(s.is_seen("B-002"))
+
+
+class TestSameStoryCollapse(unittest.TestCase):
+    """同案不同入库编号：只保留代表编号，推送时别名连带标记"""
+
+    def test_collapse_and_alias_marking(self):
+        from pipeline import _collapse_same_story
+        cases = [
+            {"rule_code": "CODE-A", "title": "张某诉某村委会征地补偿款分配纠纷案"},
+            {"rule_code": "CODE-B", "title": "张某诉某村委会 征地补偿款、分配 纠纷案"},  # 归一化后同名
+            {"rule_code": "CODE-C", "title": "完全另一个案子"},
+        ]
+        kept, alias_map = _collapse_same_story(cases)
+        self.assertEqual([d["rule_code"] for d in kept], ["CODE-A", "CODE-C"])
+        self.assertEqual(alias_map, {"CODE-A": ["CODE-B"]})
+
+
+class TestTemplateBatchUniqueness(unittest.TestCase):
+    """同一批日报内：模板生成的标题/CTA 不得重复（重复是用户投诉的直接来源）"""
+
+    def _case(self, code: str) -> "Case":
+        from collector.models import Case
+        return Case(
+            rule_code=code,
+            title=f"某某诉某村委会案{code}",
+            scenario="承包方消亡继承",
+            pain_points=["信息不对称"],
+            facts=f"案{code}：周某某与村委会签订承包协议，承包地被征用后老人去世，青苗补偿款归属起争议。",
+            gist=f"裁判要旨{code}：承包地被征收后，青苗补偿费归实际使用土地并经营的承包人所有。",
+            result="村委会应返还青苗补偿款",
+        )
+
+    def test_same_scenario_cases_get_distinct_titles(self):
+        from generator.template import generate_script
+        used_titles, used_ctas = set(), set()
+        scripts = []
+        for code in ("2024-07-2-061-001", "2024-05-1-226-003"):  # 旧逻辑下这两例必撞标题
+            s = generate_script(
+                self._case(code), used_titles=used_titles, used_ctas=used_ctas,
+            )
+            scripts.append(s)
+        titles = [s["title"] for s in scripts]
+        self.assertEqual(len(titles), len(set(titles)), f"批内标题重复: {titles}")
+
+    def test_many_cases_titles_stay_unique(self):
+        from generator.template import generate_script
+        used_titles, used_ctas = set(), set()
+        titles = []
+        for i in range(8):
+            s = generate_script(
+                self._case(f"2024-07-2-044-{i:03d}"),
+                used_titles=used_titles, used_ctas=used_ctas,
+            )
+            titles.append(s["title"])
+        self.assertEqual(len(titles), len(set(titles)))
+
+
+class TestScenarioClassifier(unittest.TestCase):
+    """场景分类器：评分制 + 弱词不误触发"""
+
+    def test_embezzlement_not_inheritance(self):
+        """村干部职务侵占案即使提到青苗补偿，也应归资金侵占而非承包方消亡继承"""
+        from collector.extractor import classify_scenario
+        text = (
+            "王某甲系某村社区党委书记。征地后青苗补偿款到账，王某甲安排他人将补偿费平账，"
+            "贪污、侵吞集体资金，犯职务侵占罪、挪用资金罪。"
+        )
+        self.assertEqual(classify_scenario(text), "资金侵占")
+
+    def test_shareholder_cert_case(self):
+        from collector.extractor import classify_scenario
+        text = (
+            "妇女离婚回村参加产权制度改革，村里发股权证没有她，征地补偿款也未分给她。"
+            "土地征收补偿费用争议。"
+        )
+        self.assertEqual(classify_scenario(text), "外嫁女·股权证")
+
+    def test_weak_evidence_returns_empty(self):
+        """只出现一个泛词（如厂房）不给贴标签，宁缺毋滥"""
+        from collector.extractor import classify_scenario
+        self.assertEqual(classify_scenario("某公司厂房位于村内"), "")
+
+    def test_narrative_word_no_false_trigger(self):
+        """'村干部'仅出现在叙事引用中、无侵占罪名词时不得误判资金侵占"""
+        from collector.extractor import classify_scenario
+        text = (
+            "高某某与村委会签订承包经营合同，未经民主议定程序，"
+            "时任村主任签字盖章。判决说了一句很重的话——村干部以权谋私的定性考量时间节点。"
+        )
+        self.assertNotEqual(classify_scenario(text), "资金侵占")
 
 
 class TestCrawlStore(unittest.TestCase):

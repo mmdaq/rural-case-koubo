@@ -1,4 +1,10 @@
-"""查重去重：基于入库编号（唯一键）的持久化去重库，支持冷却期轮换选材"""
+"""查重去重：基于入库编号（唯一键）的持久化去重库，支持冷却期轮换选材
+
+防状态丢失机制：除 seen_cases.json 外，还维护一份 append-only 推送历史
+push_history.jsonl（每次推送追加一行，从不删改）。即使 seen_cases.json 被
+旧版本/误操作覆盖丢失条目，加载时也会从历史文件合并恢复，保证已推送案例
+永不重复推送。
+"""
 import hashlib
 import json
 import os
@@ -26,10 +32,14 @@ class SeenStore:
     不再用标题差异区分，避免同案不同标题绕过去重。
     """
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, history_path: str = ""):
         self.path = path
+        self.history_path = history_path
         self.data = {"cases": {}}
         self._load()
+        if self.history_path:
+            self._merge_history()
+            self._backfill_history()
 
     def _load(self):
         if os.path.exists(self.path):
@@ -39,6 +49,55 @@ class SeenStore:
             except (json.JSONDecodeError, OSError) as e:
                 log.warning("去重库读取失败，重建: %s", e)
                 self.data = {"cases": {}}
+
+    def _merge_history(self):
+        """从 append-only 历史文件合并推送记录（seen_cases.json 丢条目时兜底恢复）"""
+        if not os.path.exists(self.history_path):
+            return
+        merged = 0
+        try:
+            with open(self.history_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue  # 容忍半行/损坏行
+                    code = rec.get("rule_code", "")
+                    pushed_at = rec.get("pushed_at", "")
+                    if not code or not pushed_at:
+                        continue
+                    cur = self.data["cases"].get(code)
+                    if cur is None or str(cur.get("pushed_at", "")) < pushed_at:
+                        self.data["cases"][code] = {
+                            "title_hash": rec.get("title_hash", ""),
+                            "pushed_at": pushed_at,
+                        }
+                        merged += 1
+        except OSError as e:
+            log.warning("推送历史读取失败（忽略）: %s", e)
+            return
+        if merged:
+            log.info("从 push_history.jsonl 合并 %d 条推送记录（防丢失兜底）", merged)
+
+    def _backfill_history(self):
+        """历史文件不存在时，用当前去重库一次性播种，之后只追加"""
+        if os.path.exists(self.history_path):
+            return
+        try:
+            os.makedirs(os.path.dirname(self.history_path) or ".", exist_ok=True)
+            with open(self.history_path, "a", encoding="utf-8") as f:
+                for code, rec in self.data["cases"].items():
+                    f.write(json.dumps({
+                        "rule_code": code,
+                        "title_hash": rec.get("title_hash", ""),
+                        "pushed_at": rec.get("pushed_at", ""),
+                    }, ensure_ascii=False) + "\n")
+            log.info("已播种推送历史 %s（%d 条）", self.history_path, len(self.data["cases"]))
+        except OSError as e:
+            log.warning("推送历史播种失败（不影响主流程）: %s", e)
 
     def _save(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -72,11 +131,22 @@ class SeenStore:
             rule_code = f"no-code:{title_hash(title)}" if title else ""
         if not rule_code:
             return
-        self.data["cases"][rule_code] = {
+        rec = {
             "title_hash": title_hash(title) if title else "",
             "pushed_at": datetime.now().isoformat(timespec="seconds"),
         }
+        self.data["cases"][rule_code] = rec
         self._save()
+        # append-only 历史：即使 seen_cases.json 日后被旧版覆盖，也能从这里恢复
+        if self.history_path:
+            try:
+                os.makedirs(os.path.dirname(self.history_path) or ".", exist_ok=True)
+                with open(self.history_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(
+                        {"rule_code": rule_code, **rec}, ensure_ascii=False,
+                    ) + "\n")
+            except OSError as e:
+                log.warning("推送历史追加失败（不影响主流程）: %s", e)
 
     def dedup(self, cases: list) -> list:
         """过滤掉已推送过的案例"""
