@@ -72,11 +72,11 @@ def _count_unseen(extra, seen) -> int:
 def _refresh_pool(extra, crawled, cfg: dict, current_unseen: int = 0) -> int:
     """主动刷新案例池：当池中未推送案例不足时，触发更强力的搜索补充。
 
-    返回本次新入库的案例数。限制总耗时在 60 秒内。
+    返回本次新入库的案例数。限制总耗时在 180 秒内（含官方库采集）。
     """
     import time as _time
     _start = _time.time()
-    _timeout = 55  # 秒
+    _timeout = 150  # 秒（含 RMFYALK 批量采集）
 
     pool_cfg = cfg.get("collector", {}).get("pool", {})
     alert = int(pool_cfg.get("alert_threshold", 10))
@@ -189,7 +189,27 @@ def _refresh_pool(extra, crawled, cfg: dict, current_unseen: int = 0) -> int:
     except (TimeoutError, Exception) as e:
         log.warning("刷新-二级源采集异常: %s", e)
 
-    # 5. 去重检查：确保每个案例是独立的（标题相似度查重）
+    # 5. 官方案例库批量采集（人民法院案例库 API 直采，补充官方案例）
+    try:
+        _check_timeout()
+        rmfyalk_token = cfg.get("collector", {}).get("rmfyalk_token", "").strip()
+        if rmfyalk_token:
+            from collector.rmfyalk_bulk import harvest_by_keyword, SEARCH_KEYWORDS
+            # 刷新时只采前 3 个关键词、每关键词 1 页（避免超时），快速补充池子
+            _refresh_kws = SEARCH_KEYWORDS[:3]
+            for kw in _refresh_kws:
+                if _time.time() - _start > _timeout - 10:
+                    log.info("刷新-官方库：时间即将耗尽，跳过剩余关键词")
+                    break
+                cnt = harvest_by_keyword(extra, kw, max_pages=1)
+                refreshed += cnt
+                log.info("刷新-官方库[%s]新入库 %d 个", kw, cnt)
+        else:
+            log.debug("跳过官方库采集：未配置 rmfyalk_token")
+    except (TimeoutError, Exception) as e:
+        log.warning("刷新-官方库采集异常: %s", e)
+
+    # 6. 去重检查：确保每个案例是独立的（标题相似度查重）
     from collector.extrastore import ExtraStore
     _dedup_pool(extra, strictness=int(cfg.get("collector", {}).get("pool", {}).get("dedup_strictness", 1)))
 

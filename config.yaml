@@ -49,6 +49,8 @@ collector:
   # 官库检索参数
   rmfyalk_keywords_per_day: 12     # 官库每轮使用的关键词数
   rmfyalk_pages_per_keyword: 1     # 官库每个关键词翻的页数（每页20条）
+  rmfyalk_token: "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJleHAiOjE3ODg5NTMzNDAsInVzZXJuYW1lIjoiRUxqT3dORk1XbklHVW02MTlKcThUaW5qY01LakU5V1I0N2VSeWtoOWdlTXZndXkxSzRsWXZWekVvRnFZa0hnR0xGdnRoaW5NZ2srUVxuYW9SbEhldDdNNzVRRGc0bjB0S29tUlQzK1pxeWR1QT0ifQ.tGv7EMHyMiIRACakn7jrn-K_SztSOb8z1UecYC8I7ik"
+  rmfyalk_pool_min_pages: 3
   rmfyalk_keywords:
     - "集体经济组织成员权益"
     - "外嫁女"
