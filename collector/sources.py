@@ -6,6 +6,8 @@ RMFYALK_HOME = "https://rmfyalk.court.gov.cn"
 RMFYALK_SEARCH = "https://rmfyalk.court.gov.cn/web/rmfyalk/search"
 # 最高人民法院官网 · 涉农民事典型案例栏目
 COURT_GOV_AGRICULTURE = "https://www.court.gov.cn/zixun/xiangqing/423762.html"
+# 最高法典型案例发布栏目（多页，含涉农案例）
+COURT_GOV_CASES_LIST = "https://www.court.gov.cn/zixun/gengduo/104_3.html"
 # 搜索引擎模板（检索案例库转载内容）
 SEARCH_ENGINES = {
     "bing": "https://www.bing.com/search?q={q}&setlang=zh-hans",
@@ -22,3 +24,4 @@ SOURCE_HINTS = {
 def make_case(rule_code: str, title: str, **kwargs) -> Case:
     """统一构造 Case（保证字段完整）"""
     return Case(rule_code=rule_code, title=title, **kwargs)
+

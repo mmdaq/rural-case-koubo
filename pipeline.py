@@ -62,6 +62,168 @@ def _collapse_same_story(cases: list) -> tuple[list, dict]:
     return kept, alias_map
 
 
+def _count_unseen(extra, seen) -> int:
+    """统计扩展库中未推送的案例数（真实可用库存）"""
+    extra_codes = set(extra.data.get("cases", {}).keys())
+    seen_codes = set(seen.data.get("cases", {}).keys())
+    return len(extra_codes - seen_codes)
+
+
+def _refresh_pool(extra, crawled, cfg: dict, current_unseen: int = 0) -> int:
+    """主动刷新案例池：当池中未推送案例不足时，触发更强力的搜索补充。
+
+    返回本次新入库的案例数。限制总耗时在 60 秒内。
+    """
+    import time as _time
+    _start = _time.time()
+    _timeout = 55  # 秒
+
+    pool_cfg = cfg.get("collector", {}).get("pool", {})
+    alert = int(pool_cfg.get("alert_threshold", 10))
+    refresh_feed = int(pool_cfg.get("refresh_feed_max_fetch", 200))
+    refresh_kw_per_day = int(pool_cfg.get("refresh_search_keywords_per_day", 8))
+    refresh_result_pages = int(pool_cfg.get("refresh_search_result_pages", 3))
+    keywords = cfg.get("collector", {}).get("keywords", [])
+
+    # 收集所有关键词（包括备用关键词）以最大化覆盖
+    all_keywords = list(keywords)
+    extra_kws = [
+        "农村集体资产 案例库 入库 判决",
+        "农村集体土地征收补偿 案例",
+        "村民委员会 集体收益 分配 纠纷",
+        "外嫁女 成员资格 认定 案例",
+        "土地承包经营权 确认 纠纷 案例",
+        "农村集体经济组织 分红 案例",
+        "征地补偿 安置补助 分配 案例",
+        "农村宅基地 使用权 纠纷 案例",
+        "农村集体资产处置 民主议定 程序",
+        "农村合作社 集体股权 收益分配",
+    ]
+    for kw in extra_kws:
+        if kw not in all_keywords:
+            all_keywords.append(kw)
+
+    log.info(
+        "触发案例池刷新：当前未推送案例不足 %d 个（告警阈值 %d），"
+        "使用 %d 个关键词、翻页深度 %d 页补充案例池",
+        current_unseen, alert, len(all_keywords), refresh_result_pages,
+    )
+
+    from collector.crawler import (
+        fetch_feeds, fetch_search_web, fetch_seed_links,
+        is_rural_collective_theme,
+    )
+    from utils.validator import verify_case
+
+    refreshed = 0
+
+    def _check_timeout():
+        elapsed = _time.time() - _start
+        if elapsed > _timeout:
+            raise TimeoutError(f"刷新超时（{elapsed:.0f}s > {_timeout}s）")
+
+    # 1. 加大转载源翻页预算（限制 25 秒）
+    try:
+        _check_timeout()
+        new_cases = fetch_feeds(crawled, max_fetch=refresh_feed)
+        log.info("刷新-转载源发现 %d 个候选案例", len(new_cases))
+        for c in new_cases:
+            if not is_rural_collective_theme(c.to_dict()):
+                continue
+            v = verify_case(c.to_dict(), min_sources=0, require_official_anchor=True, relax_fields=True)
+            if not v["ok"]:
+                continue
+            if not (c.facts or "").strip() or len(c.facts) < 50 or not (c.gist or "").strip():
+                continue
+            if extra.upsert(c, source_count=1):
+                refreshed += 1
+    except (TimeoutError, Exception) as e:
+        log.warning("刷新-转载源异常: %s", e)
+
+    # 2. 加大搜索预算（限制 20 秒）
+    try:
+        _check_timeout()
+        new_cases = fetch_search_web(
+            all_keywords,
+            crawled=crawled,
+            keywords_per_day=min(len(all_keywords), refresh_kw_per_day),
+            result_pages=refresh_result_pages,
+        )
+        log.info("刷新-搜索引擎发现 %d 个候选案例", len(new_cases))
+        for c in new_cases:
+            if not is_rural_collective_theme(c.to_dict()):
+                continue
+            v = verify_case(c.to_dict(), min_sources=0, require_official_anchor=True, relax_fields=True)
+            if not v["ok"]:
+                continue
+            if not (c.facts or "").strip() or len(c.facts) < 50 or not (c.gist or "").strip():
+                continue
+            if extra.upsert(c, source_count=1):
+                refreshed += 1
+    except (TimeoutError, Exception) as e:
+        log.warning("刷新-搜索引擎异常: %s", e)
+
+    # 3. 重新抓取预置链接（限制 10 秒）
+    try:
+        _check_timeout()
+        new_cases = fetch_seed_links(crawled)
+        for c in new_cases:
+            if not is_rural_collective_theme(c.to_dict()):
+                continue
+            v = verify_case(c.to_dict(), min_sources=0, require_official_anchor=True, relax_fields=True)
+            if not v["ok"]:
+                continue
+            if extra.upsert(c, source_count=1):
+                refreshed += 1
+    except (TimeoutError, Exception) as e:
+        log.warning("刷新-预置链接异常: %s", e)
+
+    # 4. 去重检查：确保每个案例是独立的（标题相似度查重）
+    from collector.extrastore import ExtraStore
+    _dedup_pool(extra, strictness=int(cfg.get("collector", {}).get("pool", {}).get("dedup_strictness", 1)))
+
+    log.info("案例池刷新完成：新增 %d 个案例，当前池子 %d 个，未推送 %d 个",
+             refreshed, len(extra.data.get("cases", {})), current_unseen + refreshed)
+    return refreshed
+
+
+def _dedup_pool(extra: ExtraStore, strictness: int = 1):
+    """案例池去重：标题相似度查重，防止相似案例入库。
+
+    strictness=0: 仅编号查重（默认）
+    strictness=1: 编号查重 + 标题相似度查重
+    """
+    if strictness < 1:
+        return
+    import hashlib, re
+    from collector.extrastore import _norm_title
+
+    cases = list(extra.data.get("cases", {}).values())
+    seen_hashes: dict[str, str] = {}  # hash -> rule_code
+    removed = []
+    for rec in cases:
+        c = rec.get("case", {})
+        code = c.get("rule_code", "")
+        title = c.get("title", "")
+        if not code:
+            continue
+        nt = _norm_title(title)
+        h = hashlib.md5(nt.encode("utf-8")).hexdigest()[:12]
+        if h in seen_hashes:
+            existing_code = seen_hashes[h]
+            if existing_code != code:
+                log.info("标题相似度去重：删除 %s（与 %s 标题高度相似）", code, existing_code)
+                removed.append(code)
+        else:
+            seen_hashes[h] = code
+
+    for code in removed:
+        del extra.data["cases"][code]
+    extra._save()
+    if removed:
+        log.info("案例池去重：移除 %d 个重复案例", len(removed))
+
+
 def _select_candidates(
     cases: list,
     seen: SeenStore,
@@ -210,7 +372,37 @@ def run_pipeline(cfg: dict | None = None, dry_run: bool = False) -> dict:
     else:
         log.warning("未配置 RMFYALK_TOKEN，本轮跳过官网在线核对，仅使用本地锚点校验")
 
-    # 3. 选材：仅选从未推送过的案例（不复用已推送案例）
+    # 3. 案例池健康检查：未推送案例不足时主动刷新补充
+    pool_cfg = cfg.get("collector", {}).get("pool", {})
+    min_target = int(pool_cfg.get("min_target", 20))
+    alert_threshold = int(pool_cfg.get("alert_threshold", 10))
+    max_refresh = int(pool_cfg.get("max_refresh_attempts", 3))
+
+    current_unseen = _count_unseen(extra, seen)
+    log.info("案例池健康检查：未推送案例 %d 个（目标 >= %d，告警阈值 %d）",
+             current_unseen, min_target, alert_threshold)
+
+    refresh_count = 0
+    while current_unseen < alert_threshold and refresh_count < max_refresh:
+        refreshed = _refresh_pool(extra, crawled, cfg, current_unseen=current_unseen)
+        if refreshed == 0:
+            log.warning("案例池刷新无新案例入库，停止刷新尝试")
+            break
+        current_unseen = _count_unseen(extra, seen)
+        refresh_count += 1
+        log.info("第 %d 次刷新后：未推送案例 %d 个", refresh_count, current_unseen)
+
+    if current_unseen < alert_threshold:
+        log.warning(
+            "案例池仍低于告警阈值（%d < %d），本轮搜索未发现新案例。"
+            "可能需要检查采集源可达性或增加新的案例来源。",
+            current_unseen, alert_threshold,
+        )
+    elif current_unseen < min_target:
+        log.info("案例池未达安全目标（%d < %d），但高于告警阈值，继续运行",
+                 current_unseen, min_target)
+
+    # 4. 选材：仅选从未推送过的案例（不复用已推送案例）
     gen_cfg = cfg.get("generator", {})
     count = int(gen_cfg.get("count_per_day", 5))
     cooldown_days = int(gen_cfg.get("cooldown_days", 7))

@@ -114,6 +114,13 @@ SEED_LINKS = [
     {"url": "https://www.taxdy.cn/h-nd-295577.html", "name": "税递网案例库原文", "multi": False},
     {"url": "https://m.055110.com/fl/3/6279.html", "name": "安徽律师网案例库原文", "multi": False},
     {"url": "https://shengtinglaw.com/qita-xiangqing-11044.html", "name": "圣廷律师案例解析", "multi": True},
+    # 新增：律法网案例库汇总页（持续收录新入库案例）
+    {"url": "https://m.055110.com/xs/4/31628.html", "name": "律法网·人民法院案例库新增案例", "multi": False},
+    {"url": "https://m.055110.com/xs/4/36379.html", "name": "律法网·人民法院案例库新增案例", "multi": False},
+    # 新增：最高法典型案例栏目
+    {"url": "https://www.court.gov.cn/zixun/xiangqing/423762.html", "name": "最高法涉农民事典型案例", "multi": False},
+    # 新增：各地高院典型案例
+    {"url": "https://www.court.gov.cn/zixun/gengduo/104_3.html", "name": "最高法典型案例发布", "multi": True},
 ]
 
 
@@ -164,6 +171,14 @@ FEED_SOURCES = [
         "link_pattern": "fl/3/",
         "page_param": None,
         "max_pages": 3,
+        "prefilter": True,
+    },
+    {
+        "name": "律法网·民事案例",
+        "url": "https://m.055110.com/xs/4/",
+        "link_pattern": "xs/4/",
+        "page_param": None,
+        "max_pages": 5,
         "prefilter": True,
     },
 ]
