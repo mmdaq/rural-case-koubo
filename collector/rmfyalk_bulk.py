@@ -362,7 +362,9 @@ def generate_case_table(extra: ExtraStore, output_path: str) -> str:
         "| 入库编号 | 标题 | 基本案情 | 裁判要旨 | 判决结果 | 法院 | 案号 |",
         "|---------|------|---------|---------|---------|------|------|",
     ]
-    for code, case in sorted(cases.items()):
+    for code, wrapper in sorted(cases.items()):
+        # ExtraStore wraps cases under "case" key
+        case = wrapper.get("case", wrapper) if isinstance(wrapper, dict) else wrapper
         title = (case.get("title") or "").replace("|", "\\|")[:50]
         facts = (case.get("facts") or "")[:80].replace("\n", " ").replace("|", "\\|")
         gist = (case.get("gist") or "")[:80].replace("\n", " ").replace("|", "\\|")
