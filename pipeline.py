@@ -178,7 +178,18 @@ def _refresh_pool(extra, crawled, cfg: dict, current_unseen: int = 0) -> int:
     except (TimeoutError, Exception) as e:
         log.warning("刷新-预置链接异常: %s", e)
 
-    # 4. 去重检查：确保每个案例是独立的（标题相似度查重）
+    # 4. 二级整理源批量采集（盛廷律所/律法网等已核实的案例库整理文章）
+    try:
+        _check_timeout()
+        from collector.aggregator import harvest_all_sources
+        agg_results = harvest_all_sources(extra, crawled)
+        for src, cnt in agg_results.items():
+            refreshed += cnt
+            log.info("刷新-二级源[%s]新入库 %d 个", src, cnt)
+    except (TimeoutError, Exception) as e:
+        log.warning("刷新-二级源采集异常: %s", e)
+
+    # 5. 去重检查：确保每个案例是独立的（标题相似度查重）
     from collector.extrastore import ExtraStore
     _dedup_pool(extra, strictness=int(cfg.get("collector", {}).get("pool", {}).get("dedup_strictness", 1)))
 
